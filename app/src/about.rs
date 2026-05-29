@@ -20,9 +20,7 @@ fn set_regular_activation_policy() {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     #[allow(deprecated)]
-    unsafe {
-        app.activateIgnoringOtherApps(true);
-    }
+    app.activateIgnoringOtherApps(true);
 }
 
 pub fn run() -> Result<()> {
@@ -74,9 +72,10 @@ fn install_unicode_fonts(ctx: &egui::Context) {
     }
     let Some(bytes) = data else { return };
     let mut fonts = FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("system-unicode".to_string(), FontData::from_owned(bytes).into());
+    fonts.font_data.insert(
+        "system-unicode".to_string(),
+        FontData::from_owned(bytes).into(),
+    );
     fonts
         .families
         .entry(FontFamily::Proportional)
@@ -94,10 +93,9 @@ fn apply_theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.visuals.dark_mode = true;
     style.visuals.override_text_color = Some(Color32::from_rgb(232, 234, 240));
-    style.text_styles.insert(
-        TextStyle::Body,
-        FontId::new(13.5, FontFamily::Proportional),
-    );
+    style
+        .text_styles
+        .insert(TextStyle::Body, FontId::new(13.5, FontFamily::Proportional));
     style.text_styles.insert(
         TextStyle::Small,
         FontId::new(11.0, FontFamily::Proportional),
@@ -233,8 +231,7 @@ impl eframe::App for AboutApp {
 
                 if let Some(tex) = current_tex {
                     let size = tex.size_vec2();
-                    let scale =
-                        (image_rect.width() / size.x).max(image_rect.height() / size.y);
+                    let scale = (image_rect.width() / size.x).max(image_rect.height() / size.y);
                     let scaled = size * scale;
                     let center = image_rect.center();
                     let img_rect = egui::Rect::from_center_size(center, scaled);
@@ -260,9 +257,11 @@ impl eframe::App for AboutApp {
                             fade_top + ((i + 1) as f32 / steps as f32) * fade_height,
                         ),
                     );
-                    painter.rect_filled(stripe, Rounding::ZERO, Color32::from_rgba_unmultiplied(
-                        BG.r(), BG.g(), BG.b(), alpha,
-                    ));
+                    painter.rect_filled(
+                        stripe,
+                        Rounding::ZERO,
+                        Color32::from_rgba_unmultiplied(BG.r(), BG.g(), BG.b(), alpha),
+                    );
                 }
 
                 // ---------- Text panel (bottom portion) ----------
@@ -387,28 +386,17 @@ fn chip(ui: &mut egui::Ui, text: &str) {
         .rounding(Rounding::same(999.0))
         .inner_margin(Margin::symmetric(10.0, 4.0))
         .show(ui, |ui| {
-            ui.label(
-                RichText::new(text)
-                    .color(BODY)
-                    .size(10.5),
-            );
+            ui.label(RichText::new(text).color(BODY).size(10.5));
         });
 }
 
 fn credit_line(ui: &mut egui::Ui, head: &str, body: &str) {
     ui.horizontal(|ui| {
         ui.add(egui::Label::new(
-            RichText::new(head)
-                .color(SUBTITLE)
-                .size(11.0)
-                .strong(),
+            RichText::new(head).color(SUBTITLE).size(11.0).strong(),
         ));
         ui.add_space(6.0);
-        ui.add(egui::Label::new(
-            RichText::new(body)
-                .color(BODY)
-                .size(11.5),
-        ));
+        ui.add(egui::Label::new(RichText::new(body).color(BODY).size(11.5)));
     });
     ui.add_space(2.0);
     let _ = ACCENT; // keep import warm

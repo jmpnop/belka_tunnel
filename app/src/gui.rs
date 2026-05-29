@@ -17,9 +17,7 @@ fn set_regular_activation_policy() {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     #[allow(deprecated)]
-    unsafe {
-        app.activateIgnoringOtherApps(true);
-    }
+    app.activateIgnoringOtherApps(true);
 }
 
 pub fn run() -> Result<()> {
@@ -75,9 +73,10 @@ fn install_unicode_fonts(ctx: &egui::Context) {
     let Some((path, bytes)) = data else { return };
 
     let mut fonts = FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("system-unicode".to_string(), FontData::from_owned(bytes).into());
+    fonts.font_data.insert(
+        "system-unicode".to_string(),
+        FontData::from_owned(bytes).into(),
+    );
     fonts
         .families
         .entry(FontFamily::Proportional)
@@ -167,22 +166,18 @@ fn apply_zed_theme(ctx: &egui::Context) {
 
     // Custom text styles with consistent sizes.
     use egui::FontFamily::Proportional;
-    style.text_styles.insert(
-        TextStyle::Heading,
-        FontId::new(20.0, Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Body,
-        FontId::new(13.5, Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Button,
-        FontId::new(13.0, Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Small,
-        FontId::new(11.5, Proportional),
-    );
+    style
+        .text_styles
+        .insert(TextStyle::Heading, FontId::new(20.0, Proportional));
+    style
+        .text_styles
+        .insert(TextStyle::Body, FontId::new(13.5, Proportional));
+    style
+        .text_styles
+        .insert(TextStyle::Button, FontId::new(13.0, Proportional));
+    style
+        .text_styles
+        .insert(TextStyle::Small, FontId::new(11.5, Proportional));
     style.text_styles.insert(
         TextStyle::Monospace,
         FontId::new(12.5, FontFamily::Monospace),
@@ -219,12 +214,7 @@ fn section_title(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
     });
 }
 
-fn field(
-    ui: &mut egui::Ui,
-    label: &str,
-    hint: Option<&str>,
-    add: impl FnOnce(&mut egui::Ui),
-) {
+fn field(ui: &mut egui::Ui, label: &str, hint: Option<&str>, add: impl FnOnce(&mut egui::Ui)) {
     ui.vertical(|ui| {
         ui.label(
             RichText::new(label)
@@ -317,7 +307,10 @@ impl ConfigApp {
                 Ok(()) => {
                     self.last_status = Some((
                         StatusKind::Success,
-                        format!("Saved to {}. Restart from the menu bar to apply.", path.display()),
+                        format!(
+                            "Saved to {}. Restart from the menu bar to apply.",
+                            path.display()
+                        ),
                     ));
                 }
                 Err(e) => {
@@ -371,11 +364,7 @@ impl ConfigApp {
                             .size(15.0)
                             .strong(),
                     );
-                    ui.label(
-                        RichText::new("·")
-                            .color(theme::TEXT_FAINT)
-                            .size(15.0),
-                    );
+                    ui.label(RichText::new("·").color(theme::TEXT_FAINT).size(15.0));
                     ui.label(
                         RichText::new("Configuration")
                             .color(theme::TEXT_MUTED)
@@ -509,7 +498,10 @@ impl ConfigApp {
                                     .desired_width(ui.available_width() - 60.0),
                             );
                             let can_add = !self.new_profile_name.trim().is_empty()
-                                && !self.file.profiles.contains_key(self.new_profile_name.trim());
+                                && !self
+                                    .file
+                                    .profiles
+                                    .contains_key(self.new_profile_name.trim());
                             if ui
                                 .add_enabled(
                                     can_add,
@@ -520,9 +512,7 @@ impl ConfigApp {
                                 .clicked()
                             {
                                 let name = self.new_profile_name.trim().to_string();
-                                self.file
-                                    .profiles
-                                    .insert(name.clone(), Profile::default());
+                                self.file.profiles.insert(name.clone(), Profile::default());
                                 self.selected = name;
                                 self.new_profile_name.clear();
                             }
@@ -547,8 +537,8 @@ impl ConfigApp {
                             self.selected = copy_name;
                         }
                     }
-                    let can_delete =
-                        self.file.profiles.len() > 1 && self.file.profiles.contains_key(&self.selected);
+                    let can_delete = self.file.profiles.len() > 1
+                        && self.file.profiles.contains_key(&self.selected);
                     if ui
                         .add_enabled(can_delete, egui::Button::new("Delete"))
                         .clicked()
@@ -903,14 +893,8 @@ impl ConfigApp {
     fn draw_status_bar(&mut self, ctx: &egui::Context) {
         if let Some((kind, msg)) = self.last_status.clone() {
             let (fill, color) = match kind {
-                StatusKind::Success => (
-                    theme::SUCCESS.linear_multiply(0.18),
-                    theme::SUCCESS,
-                ),
-                StatusKind::Error => (
-                    theme::DANGER.linear_multiply(0.18),
-                    theme::DANGER,
-                ),
+                StatusKind::Success => (theme::SUCCESS.linear_multiply(0.18), theme::SUCCESS),
+                StatusKind::Error => (theme::DANGER.linear_multiply(0.18), theme::DANGER),
             };
             egui::TopBottomPanel::bottom("status")
                 .frame(
@@ -1014,11 +998,7 @@ fn toggle_widget<'a>(label: &'a str, on: &'a mut bool) -> impl egui::Widget + 'a
                 Stroke::NONE,
             );
         }
-        let _label_id = ui.label(
-            RichText::new(label)
-                .color(theme::TEXT_PRIMARY)
-                .size(12.5),
-        );
+        let _label_id = ui.label(RichText::new(label).color(theme::TEXT_PRIMARY).size(12.5));
         response
     }
 }

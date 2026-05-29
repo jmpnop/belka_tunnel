@@ -111,10 +111,10 @@ impl ConfigFile {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let s = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: Self = serde_json::from_str(&s)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let s =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let cfg: Self =
+            serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
         if !cfg.profiles.contains_key(&cfg.active) {
             anyhow::bail!(
                 "active profile '{}' does not exist in profiles list",

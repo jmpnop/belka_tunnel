@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 mod about;
 mod config;
 mod firefox;
@@ -14,6 +16,14 @@ use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
+
+/// Cross-thread guard so double-clicking destructive actions doesn't fan
+/// out into races (Firefox install, Homebrew bootstrap, relaunch).
+static FIREFOX_INSTALL_BUSY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static HOMEBREW_INSTALL_BUSY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static RELAUNCH_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 const BT_GREEN_PNG: &[u8] = include_bytes!("../assets/bt-green.png");
 const BT_ORANGE_PNG: &[u8] = include_bytes!("../assets/bt-orange.png");
@@ -158,11 +168,7 @@ fn main() -> Result<()> {
     firefox_submenu.append(&firefox_status_item)?;
     firefox_submenu.append(&PredefinedMenuItem::separator())?;
 
-    let open_firefox_item = MenuItem::new(
-        "Launch Firefox",
-        firefox_info.installed(),
-        None,
-    );
+    let open_firefox_item = MenuItem::new("Launch Firefox", firefox_info.installed(), None);
     // Firefox install is a self-contained DMG download — no Homebrew, no
     // browser. The label switches between fresh-install and update-in-place.
     let install_firefox_item = MenuItem::new(
@@ -181,11 +187,8 @@ fn main() -> Result<()> {
         firefox_info.brew.is_none(),
         None,
     );
-    let uninstall_firefox_item = MenuItem::new(
-        "Uninstall Firefox…",
-        firefox_info.installed(),
-        None,
-    );
+    let uninstall_firefox_item =
+        MenuItem::new("Uninstall Firefox…", firefox_info.installed(), None);
 
     firefox_submenu.append(&open_firefox_item)?;
     firefox_submenu.append(&PredefinedMenuItem::separator())?;
@@ -304,21 +307,65 @@ fn main() -> Result<()> {
                     error!(error = %e, "Firefox launch failed");
                     macos_alert(
                         "Couldn't launch Firefox",
-                        &format!(
-                            "{e}\n\nUse the Firefox submenu → Install Firefox to fetch it."
-                        ),
+                        &format!("{e}\n\nUse the Firefox submenu → Install Firefox to fetch it."),
                     );
                 }
             } else if event.id == install_firefox_id {
-                if let Err(e) = firefox::install_or_update_async(
+                use std::sync::atomic::Ordering;
+                if FIREFOX_INSTALL_BUSY
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    notify_user(
+                        "Firefox install already running",
+                        "Wait for the current install to finish before starting another.",
+                    );
+                } else if let Err(e) = firefox::install_or_update_async(
                     socks_host_for_firefox.clone(),
                     socks_port_for_firefox,
-                    notify_user,
+                    {
+                        // Wrap the notify so the BUSY flag is cleared on success
+                        // and failure terminal events. install_or_update_async
+                        // emits "Firefox is ready" or "Firefox install failed"
+                        // as the last call — both clear the flag.
+                        let inner = notify_user;
+                        move |title: &str, body: &str| {
+                            inner(title, body);
+                            if title.starts_with("Firefox is ready")
+                                || title.starts_with("Firefox install failed")
+                            {
+                                FIREFOX_INSTALL_BUSY.store(false, Ordering::Release);
+                            }
+                        }
+                    },
                 ) {
+                    FIREFOX_INSTALL_BUSY.store(false, Ordering::Release);
                     macos_alert("Couldn't start Firefox install", &format!("{e}"));
                 }
             } else if event.id == install_homebrew_id {
-                firefox::install_homebrew_async(notify_user);
+                use std::sync::atomic::Ordering;
+                if HOMEBREW_INSTALL_BUSY
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    notify_user(
+                        "Homebrew install already running",
+                        "A poller is already watching for brew to appear.",
+                    );
+                } else {
+                    firefox::install_homebrew_async({
+                        let inner = notify_user;
+                        move |title: &str, body: &str| {
+                            inner(title, body);
+                            if title.starts_with("Homebrew installed")
+                                || title.starts_with("Homebrew install")
+                                || title.starts_with("Couldn't open Terminal")
+                            {
+                                HOMEBREW_INSTALL_BUSY.store(false, Ordering::Release);
+                            }
+                        }
+                    });
+                }
             } else if event.id == uninstall_firefox_id {
                 if macos_confirm(
                     "Uninstall Firefox?",
@@ -340,10 +387,16 @@ fn main() -> Result<()> {
                 ensure_file_exists(&log_path);
                 open_path(&log_path);
             } else if event.id == restart_id {
-                info!("restart requested");
-                tray.take();
-                relaunch_self();
-                *control_flow = ControlFlow::Exit;
+                use std::sync::atomic::Ordering;
+                if RELAUNCH_BUSY
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    info!("restart requested");
+                    tray.take();
+                    relaunch_self();
+                    *control_flow = ControlFlow::Exit;
+                }
             } else if event.id == copy_endpoints_id {
                 if let Some(ep) = &primary_endpoint {
                     copy_to_clipboard(ep);
@@ -410,8 +463,8 @@ fn init_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let env = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,russh=warn"));
+    let env =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,russh=warn"));
 
     let registry = tracing_subscriber::registry().with(env).with(stderr_layer);
 
@@ -529,7 +582,12 @@ fn update_listen_addr(config_path: &std::path::Path, new_addr: &str) -> Result<(
 }
 
 fn macos_alert(title: &str, body: &str) {
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let esc = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    };
     let script = format!(
         r#"display alert "{}" message "{}" as critical buttons {{"OK"}} default button "OK""#,
         esc(title),
@@ -544,7 +602,12 @@ fn macos_alert(title: &str, body: &str) {
 /// Modal Yes/No confirmation. Returns true if the user clicked `action_label`.
 /// Default + cancel button is "Cancel".
 fn macos_confirm(title: &str, body: &str, action_label: &str) -> bool {
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let esc = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    };
     let script = format!(
         r#"set r to display alert "{}" message "{}" buttons {{"Cancel", "{}"}} default button "Cancel" cancel button "Cancel" as critical
 return button returned of r"#,
@@ -567,7 +630,12 @@ return button returned of r"#,
 
 /// Non-modal user notification — appears in the Notification Center.
 fn notify_user(title: &str, body: &str) {
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let esc = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    };
     let script = format!(
         r#"display notification "{}" with title "{}""#,
         esc(body),
@@ -584,8 +652,7 @@ fn decode_icon(bytes: &[u8]) -> Result<Icon> {
         .map_err(|e| anyhow::anyhow!("decode tray icon: {e}"))?
         .to_rgba8();
     let (w, h) = img.dimensions();
-    Icon::from_rgba(img.into_raw(), w, h)
-        .map_err(|e| anyhow::anyhow!("build tray icon: {e}"))
+    Icon::from_rgba(img.into_raw(), w, h).map_err(|e| anyhow::anyhow!("build tray icon: {e}"))
 }
 
 fn spawn_gui() {
@@ -605,7 +672,8 @@ fn spawn_about() {
 }
 
 fn update_hide_dot(config_path: &std::path::Path, hide: bool) -> Result<()> {
-    let mut file = ConfigFile::load(config_path).or_else(|_| Ok::<_, anyhow::Error>(ConfigFile::default()))?;
+    let mut file =
+        ConfigFile::load(config_path).or_else(|_| Ok::<_, anyhow::Error>(ConfigFile::default()))?;
     file.hide_status_dot = hide;
     file.save(config_path)?;
     Ok(())

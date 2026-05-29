@@ -17,30 +17,43 @@ pub enum Status {
     Disabled,
 }
 
+/// Legacy handle returned by the unused `spawn()` helper; kept for
+/// API-compat with any future caller. The internal channel receiver isn't
+/// currently observed.
+#[allow(dead_code)]
 pub struct Tunnel {
     pub status_rx: watch::Receiver<Status>,
 }
 
+/// Tunnel on/off + change-notification rolled into one. Backed by a
+/// `tokio::sync::watch::channel<bool>` because watch is edge-triggered AND
+/// stores the latest value — so a flip from disabled→enabled that races
+/// against the reconnect loop's `.changed().await` registration never
+/// gets lost (which the previous `Notify` design could swallow).
 #[derive(Clone)]
 pub struct Control {
-    pub enabled: Arc<std::sync::atomic::AtomicBool>,
-    pub wakeup: Arc<tokio::sync::Notify>,
+    tx: Arc<watch::Sender<bool>>,
+    rx: watch::Receiver<bool>,
 }
 
 impl Control {
     pub fn new(enabled: bool) -> Self {
+        let (tx, rx) = watch::channel(enabled);
         Self {
-            enabled: Arc::new(std::sync::atomic::AtomicBool::new(enabled)),
-            wakeup: Arc::new(tokio::sync::Notify::new()),
+            tx: Arc::new(tx),
+            rx,
         }
     }
     pub fn set_enabled(&self, on: bool) {
-        self.enabled
-            .store(on, std::sync::atomic::Ordering::Relaxed);
-        self.wakeup.notify_waiters();
+        let _ = self.tx.send(on);
     }
     pub fn is_enabled(&self) -> bool {
-        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+        *self.rx.borrow()
+    }
+    /// Wait for any change in the enabled flag. Does not lose wakeups.
+    pub async fn changed(&self) {
+        let mut rx = self.rx.clone();
+        let _ = rx.changed().await;
     }
 }
 
@@ -51,20 +64,20 @@ pub fn spawn(config: Arc<Config>) -> Tunnel {
     Tunnel { status_rx: rx }
 }
 
-pub async fn run_forever(
-    config: Arc<Config>,
-    status: watch::Sender<Status>,
-    control: Control,
-) {
+pub async fn run_forever(config: Arc<Config>, status: watch::Sender<Status>, control: Control) {
     let mut backoff = Duration::from_secs(config.reconnect.initial_backoff_secs);
     let max_backoff = Duration::from_secs(config.reconnect.max_backoff_secs);
 
     loop {
-        // Wait while disabled.
+        // Wait while disabled. Using watch::changed() means a set_enabled(true)
+        // call that races our check won't be lost — it will be the next value
+        // returned by changed().
         if !control.is_enabled() {
             let _ = status.send(Status::Disabled);
-            info!("tunnel disabled; waiting for wakeup");
-            control.wakeup.notified().await;
+            info!("tunnel disabled; waiting for re-enable");
+            while !control.is_enabled() {
+                control.changed().await;
+            }
             backoff = Duration::from_secs(config.reconnect.initial_backoff_secs);
             continue;
         }
@@ -99,13 +112,11 @@ pub async fn run_forever(
         info!(seconds = backoff.as_secs(), "sleeping before reconnect");
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
-            _ = control.wakeup.notified() => {}
+            _ = control.changed() => {}
         }
         backoff = std::cmp::min(
             max_backoff,
-            Duration::from_secs_f64(
-                backoff.as_secs_f64() * config.reconnect.backoff_multiplier,
-            ),
+            Duration::from_secs_f64(backoff.as_secs_f64() * config.reconnect.backoff_multiplier),
         );
     }
 }
@@ -187,7 +198,7 @@ async fn run_one_session(
                             break;
                         }
                     }
-                    _ = control.wakeup.notified() => {
+                    _ = control.changed() => {
                         if !control.is_enabled() {
                             info!("tunnel disabled by user; signalling SOCKS to stop");
                             dead.notify_waiters();

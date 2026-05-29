@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Thin wrapper: invoke the bt Python CLI via uv from anywhere in the repo.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec uv run --project "$ROOT/tools" bt "$@"

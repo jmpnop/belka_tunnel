@@ -17,9 +17,7 @@ impl FirefoxInfo {
 
 pub fn detect() -> FirefoxInfo {
     let path = locate_firefox_bundle();
-    let version = path
-        .as_ref()
-        .and_then(|p| read_firefox_version(p));
+    let version = path.as_ref().and_then(|p| read_firefox_version(p));
     let brew = locate_brew();
     FirefoxInfo {
         path,
@@ -29,8 +27,7 @@ pub fn detect() -> FirefoxInfo {
 }
 
 fn locate_firefox_bundle() -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> =
-        vec![PathBuf::from("/Applications/Firefox.app")];
+    let mut candidates: Vec<PathBuf> = vec![PathBuf::from("/Applications/Firefox.app")];
     if let Ok(home) = std::env::var("HOME") {
         candidates.push(PathBuf::from(format!("{home}/Applications/Firefox.app")));
     }
@@ -96,7 +93,9 @@ pub fn cleanup_legacy_profile() {
     if legacy.exists() {
         match std::fs::remove_dir_all(&legacy) {
             Ok(()) => info!(path = %legacy.display(), "removed legacy firefox-profile dir"),
-            Err(e) => warn!(path = %legacy.display(), error = %e, "could not remove legacy firefox-profile dir"),
+            Err(e) => {
+                warn!(path = %legacy.display(), error = %e, "could not remove legacy firefox-profile dir")
+            }
         }
     }
 }
@@ -155,112 +154,121 @@ pub fn install_or_update_async(
 /// and the user cannot disable it from the Settings UI (`Locked: true`).
 ///
 /// Reference: https://mozilla.github.io/policy-templates/#proxy
-pub fn install_firefox_policies(bundle: &Path, socks_host: &str, socks_port: u16) -> Result<PathBuf> {
+///
+/// Implementation note: the policy JSON is built via `serde_json::json!` so
+/// every string is properly escaped — a user-edited config with `"` in the
+/// host can't silently break Firefox's policy parser and unlock the proxy.
+pub fn install_firefox_policies(
+    bundle: &Path,
+    socks_host: &str,
+    socks_port: u16,
+) -> Result<PathBuf> {
     let dist_dir = bundle.join("Contents/Resources/distribution");
-    std::fs::create_dir_all(&dist_dir)
-        .with_context(|| format!("mkdir {}", dist_dir.display()))?;
+    std::fs::create_dir_all(&dist_dir).with_context(|| format!("mkdir {}", dist_dir.display()))?;
     let policies_path = dist_dir.join("policies.json");
 
     let socks_addr = format!("{}:{}", socks_host, socks_port);
-    let json = format!(
-        r#"{{
-  "_comment": "Managed by БелкаТуннель. Forces all Firefox traffic through the SSH SOCKS5 tunnel + Tor-Browser-style anti-fingerprinting.",
-  "policies": {{
-    "Proxy": {{
-      "Mode": "manual",
-      "SOCKSProxy": "{addr}",
-      "SOCKSVersion": 5,
-      "UseProxyForDNS": true,
-      "Locked": true
-    }},
-    "DNSOverHTTPS": {{
-      "Enabled": true,
-      "Locked": true
-    }},
-    "EnableTrackingProtection": {{
-      "Value": true,
-      "Locked": true,
-      "Cryptomining": true,
-      "Fingerprinting": true,
-      "EmailTracking": true
-    }},
-    "WebRTCIPHandling": {{
-      "Mode": "disable_non_proxied_udp",
-      "Locked": true
-    }},
-    "SearchEngines": {{
-      "Default": "Google",
-      "PreventInstalls": false,
-      "Remove": ["Яндекс", "Mail.ru"]
-    }},
-    "Permissions": {{
-      "Geolocation": {{ "BlockNewRequests": true, "Locked": true }},
-      "Camera":      {{ "BlockNewRequests": true, "Locked": true }},
-      "Microphone":  {{ "BlockNewRequests": true, "Locked": true }},
-      "Notifications": {{ "BlockNewRequests": true, "Locked": true }}
-    }},
-    "Preferences": {{
-      "geo.enabled":                        {{ "Value": false, "Status": "locked" }},
-      "geo.provider.network.url":           {{ "Value": "",    "Status": "locked" }},
-      "browser.region.network.url":         {{ "Value": "",    "Status": "locked" }},
-      "browser.search.geoSpecificDefaults": {{ "Value": false, "Status": "locked" }},
+    let pref_locked_bool = |v: bool| serde_json::json!({ "Value": v, "Status": "locked" });
+    let pref_locked_str = |v: &str| serde_json::json!({ "Value": v, "Status": "locked" });
+    let pref_locked_int = |v: i64| serde_json::json!({ "Value": v, "Status": "locked" });
+    let block_locked = serde_json::json!({ "BlockNewRequests": true, "Locked": true });
 
-      "privacy.resistFingerprinting":                       {{ "Value": true,  "Status": "locked" }},
-      "privacy.fingerprintingProtection":                   {{ "Value": true,  "Status": "locked" }},
-      "privacy.firstparty.isolate":                         {{ "Value": true,  "Status": "locked" }},
-      "privacy.trackingprotection.fingerprinting.enabled":  {{ "Value": true,  "Status": "locked" }},
-      "privacy.trackingprotection.cryptomining.enabled":    {{ "Value": true,  "Status": "locked" }},
+    let policy = serde_json::json!({
+        "_comment": "Managed by БелкаТуннель. Locked SOCKS5 + RFP-style anti-fingerprinting.",
+        "policies": {
+            "Proxy": {
+                "Mode": "manual",
+                "SOCKSProxy": socks_addr,
+                "SOCKSVersion": 5,
+                "UseProxyForDNS": true,
+                "Locked": true
+            },
+            "DNSOverHTTPS": { "Enabled": true, "Locked": true },
+            "EnableTrackingProtection": {
+                "Value": true, "Locked": true,
+                "Cryptomining": true, "Fingerprinting": true, "EmailTracking": true
+            },
+            "WebRTCIPHandling": { "Mode": "disable_non_proxied_udp", "Locked": true },
+            "SearchEngines": {
+                "Default": "Google",
+                "PreventInstalls": false,
+                "Remove": ["Яндекс", "Mail.ru"]
+            },
+            "Permissions": {
+                "Geolocation":   &block_locked,
+                "Camera":        &block_locked,
+                "Microphone":    &block_locked,
+                "Notifications": &block_locked
+            },
+            // Lock Firefox into a non-self-updating state so the bundle's
+            // policies.json survives — Firefox's in-app updater rewrites the
+            // app bundle wholesale and would otherwise wipe our policy.
+            "AppAutoUpdate": false,
+            "DisableAppUpdate": true,
+            "BackgroundAppUpdate": false,
 
-      "media.peerconnection.ice.default_address_only":      {{ "Value": true,  "Status": "locked" }},
-      "media.navigator.enabled":                            {{ "Value": false, "Status": "locked" }},
+            "Preferences": {
+                "geo.enabled":                        pref_locked_bool(false),
+                "geo.provider.network.url":           pref_locked_str(""),
+                "browser.region.network.url":         pref_locked_str(""),
+                "browser.search.geoSpecificDefaults": pref_locked_bool(false),
 
-      "dom.event.clipboardevents.enabled":                  {{ "Value": false, "Status": "locked" }},
-      "dom.battery.enabled":                                {{ "Value": false, "Status": "locked" }},
-      "dom.webaudio.enabled":                               {{ "Value": false, "Status": "locked" }},
-      "dom.gamepad.enabled":                                {{ "Value": false, "Status": "locked" }},
+                "privacy.resistFingerprinting":                      pref_locked_bool(true),
+                "privacy.fingerprintingProtection":                  pref_locked_bool(true),
+                "privacy.firstparty.isolate":                        pref_locked_bool(true),
+                "privacy.trackingprotection.fingerprinting.enabled": pref_locked_bool(true),
+                "privacy.trackingprotection.cryptomining.enabled":   pref_locked_bool(true),
 
-      "network.http.referer.XOriginPolicy":                 {{ "Value": 1,     "Status": "locked" }},
-      "network.http.referer.XOriginTrimmingPolicy":         {{ "Value": 2,     "Status": "locked" }},
-      "network.http.sendRefererHeader":                     {{ "Value": 1,     "Status": "locked" }},
+                "media.peerconnection.ice.default_address_only":     pref_locked_bool(true),
+                "media.navigator.enabled":                           pref_locked_bool(false),
 
-      "intl.accept_languages":                              {{ "Value": "en-US, en",  "Status": "locked" }},
-      "intl.locale.requested":                              {{ "Value": "en-US",      "Status": "locked" }},
-      "intl.locale.matchOS":                                {{ "Value": false,        "Status": "locked" }},
-      "intl.regional_prefs.use_os_locales":                 {{ "Value": false,        "Status": "locked" }},
-      "general.useragent.locale":                           {{ "Value": "en-US",      "Status": "locked" }},
+                "dom.event.clipboardevents.enabled":                 pref_locked_bool(false),
+                "dom.battery.enabled":                               pref_locked_bool(false),
+                "dom.webaudio.enabled":                              pref_locked_bool(false),
+                "dom.gamepad.enabled":                               pref_locked_bool(false),
 
-      "spellchecker.dictionary":                            {{ "Value": "en-US",      "Status": "locked" }},
+                "network.http.referer.XOriginPolicy":                pref_locked_int(1),
+                "network.http.referer.XOriginTrimmingPolicy":        pref_locked_int(2),
+                "network.http.sendRefererHeader":                    pref_locked_int(1),
 
-      "browser.search.suggest.enabled":                     {{ "Value": false,        "Status": "locked" }},
-      "browser.urlbar.suggest.searches":                    {{ "Value": false,        "Status": "locked" }},
-      "browser.urlbar.suggest.engines":                     {{ "Value": false,        "Status": "locked" }},
+                "intl.accept_languages":              pref_locked_str("en-US, en"),
+                "intl.locale.requested":              pref_locked_str("en-US"),
+                "intl.locale.matchOS":                pref_locked_bool(false),
+                "intl.regional_prefs.use_os_locales": pref_locked_bool(false),
+                "general.useragent.locale":           pref_locked_str("en-US"),
 
-      "browser.newtabpage.activity-stream.feeds.section.topstories": {{ "Value": false, "Status": "locked" }},
-      "browser.newtabpage.activity-stream.showSponsored":            {{ "Value": false, "Status": "locked" }},
-      "browser.newtabpage.activity-stream.showSponsoredTopSites":    {{ "Value": false, "Status": "locked" }},
-      "browser.newtabpage.activity-stream.section.highlights.includePocket": {{ "Value": false, "Status": "locked" }},
-      "browser.discovery.enabled":                          {{ "Value": false,        "Status": "locked" }},
+                "spellchecker.dictionary":            pref_locked_str("en-US"),
 
-      "browser.translations.automaticPopup":                {{ "Value": false,        "Status": "locked" }},
-      "browser.translations.enable":                        {{ "Value": false,        "Status": "locked" }},
+                "browser.search.suggest.enabled":     pref_locked_bool(false),
+                "browser.urlbar.suggest.searches":    pref_locked_bool(false),
+                "browser.urlbar.suggest.engines":     pref_locked_bool(false),
 
-      "browser.region.update.enabled":                      {{ "Value": false,        "Status": "locked" }},
-      "browser.search.geoip.url":                           {{ "Value": "",           "Status": "locked" }},
+                "browser.newtabpage.activity-stream.feeds.section.topstories":         pref_locked_bool(false),
+                "browser.newtabpage.activity-stream.showSponsored":                    pref_locked_bool(false),
+                "browser.newtabpage.activity-stream.showSponsoredTopSites":            pref_locked_bool(false),
+                "browser.newtabpage.activity-stream.section.highlights.includePocket": pref_locked_bool(false),
+                "browser.discovery.enabled":          pref_locked_bool(false),
 
-      "javascript.use_us_english_locale":                   {{ "Value": true,         "Status": "locked" }}
-    }},
-    "DisableSecurityBypass": false,
-    "DisableTelemetry":        true,
-    "DisableFirefoxStudies":   true,
-    "DontCheckDefaultBrowser": true,
-    "OverrideFirstRunPage":    "https://ifconfig.me/",
-    "DisablePocket":           true
-  }}
-}}
-"#,
-        addr = socks_addr
-    );
-    std::fs::write(&policies_path, json)
+                "browser.translations.automaticPopup": pref_locked_bool(false),
+                "browser.translations.enable":         pref_locked_bool(false),
+
+                "browser.region.update.enabled":       pref_locked_bool(false),
+                "browser.search.geoip.url":            pref_locked_str(""),
+
+                "javascript.use_us_english_locale":    pref_locked_bool(true)
+            },
+
+            "DisableSecurityBypass":   false,
+            "DisableTelemetry":        true,
+            "DisableFirefoxStudies":   true,
+            "DontCheckDefaultBrowser": true,
+            "OverrideFirstRunPage":    "https://ifconfig.me/",
+            "DisablePocket":           true
+        }
+    });
+
+    let json = serde_json::to_string_pretty(&policy).context("serialize policies.json")?;
+    std::fs::write(&policies_path, json + "\n")
         .with_context(|| format!("writing {}", policies_path.display()))?;
     info!(path = %policies_path.display(), "installed Firefox enterprise policy (Locked SOCKS5)");
     Ok(policies_path)
@@ -303,9 +311,10 @@ fn install_firefox_direct() -> Result<()> {
     let mount_point = stdout
         .lines()
         .filter_map(|l| {
-            l.split('\t').last().map(str::trim).filter(|p| {
-                p.starts_with("/Volumes/")
-            })
+            l.split('\t')
+                .next_back()
+                .map(str::trim)
+                .filter(|p| p.starts_with("/Volumes/"))
         })
         .next()
         .ok_or_else(|| anyhow!("could not parse mount point from hdiutil"))?

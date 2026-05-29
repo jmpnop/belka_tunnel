@@ -3,10 +3,16 @@ use crate::tunnel::{self, ClientHandle};
 use anyhow::{anyhow, bail, Context, Result};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
+
+/// Cap on time the client has to complete the SOCKS5 handshake (greeting +
+/// request) before we close the connection. Protects against slow / dead
+/// clients pinning a task and an FD forever.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // SOCKS5 reply codes (RFC 1928)
 const REP_SUCCESS: u8 = 0x00;
@@ -15,11 +21,7 @@ const REP_HOST_UNREACHABLE: u8 = 0x04;
 const REP_COMMAND_NOT_SUPPORTED: u8 = 0x07;
 const REP_ADDR_TYPE_NOT_SUPPORTED: u8 = 0x08;
 
-pub async fn serve(
-    config: Arc<Config>,
-    ssh: ClientHandle,
-    dead: Arc<Notify>,
-) -> Result<()> {
+pub async fn serve(config: Arc<Config>, ssh: ClientHandle, dead: Arc<Notify>) -> Result<()> {
     let listen = format!("{}:{}", config.socks.listen_addr, config.socks.listen_port);
     let listener = TcpListener::bind(&listen)
         .await
@@ -32,14 +34,30 @@ pub async fn serve(
                 let (sock, peer) = match res {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(error = %e, "accept failed");
+                        // EMFILE/ENFILE etc. would otherwise hot-loop and burn
+                        // CPU; back off briefly before retrying.
+                        warn!(error = %e, "accept failed; backing off 100ms");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
                 };
+                // SOCKS handshake is 3 small writes; Nagle would add ~40ms.
+                let _ = sock.set_nodelay(true);
                 let ssh = ssh.clone();
+                let dead_for_conn = dead.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_conn(sock, ssh).await {
-                        debug!(peer = %peer, error = %e, "client connection ended");
+                    // Race the connection against the session-dead signal so
+                    // in-flight bridges don't hold sockets after the SSH side
+                    // goes away.
+                    tokio::select! {
+                        r = handle_conn(sock, ssh) => {
+                            if let Err(e) = r {
+                                debug!(peer = %peer, error = %e, "client connection ended");
+                            }
+                        }
+                        _ = dead_for_conn.notified() => {
+                            debug!(peer = %peer, "session ended while client active");
+                        }
                     }
                 });
             }
@@ -52,21 +70,39 @@ pub async fn serve(
 }
 
 async fn handle_conn(mut sock: TcpStream, ssh: ClientHandle) -> Result<()> {
-    // --- greeting ---
-    let mut buf2 = [0u8; 2];
-    sock.read_exact(&mut buf2).await.context("read greeting")?;
-    if buf2[0] != 0x05 {
-        bail!("not SOCKS5 (version byte {})", buf2[0]);
-    }
-    let n_methods = buf2[1] as usize;
-    let mut methods = vec![0u8; n_methods];
-    sock.read_exact(&mut methods).await.context("read methods")?;
-    // We support only "no authentication required" (0x00).
-    sock.write_all(&[0x05, 0x00]).await.context("write method")?;
+    // Whole SOCKS5 handshake (greeting + method negotiation + CONNECT request)
+    // is bounded — anyone slower than HANDSHAKE_TIMEOUT gets the FIN.
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        // --- greeting ---
+        let mut buf2 = [0u8; 2];
+        sock.read_exact(&mut buf2).await.context("read greeting")?;
+        if buf2[0] != 0x05 {
+            bail!("not SOCKS5 (version byte {})", buf2[0]);
+        }
+        let n_methods = buf2[1] as usize;
+        let mut methods = vec![0u8; n_methods];
+        sock.read_exact(&mut methods)
+            .await
+            .context("read methods")?;
+        // We support only "no authentication required" (0x00); reject anything else.
+        if !methods.contains(&0x00) {
+            let _ = sock.write_all(&[0x05, 0xFF]).await;
+            bail!("client offered no acceptable auth method");
+        }
+        sock.write_all(&[0x05, 0x00])
+            .await
+            .context("write method")?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("SOCKS5 greeting timeout")??;
 
     // --- request ---
     let mut req = [0u8; 4];
-    sock.read_exact(&mut req).await.context("read request header")?;
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, sock.read_exact(&mut req))
+        .await
+        .context("SOCKS5 request timeout")?
+        .context("read request header")?;
     if req[0] != 0x05 {
         bail!("bad request version");
     }

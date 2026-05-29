@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Pre-push: precommit + bundle + verify + policy schema check.
+# Bypass once: git push --no-verify
+set -euo pipefail
+exec "$(git rev-parse --show-toplevel)/bt" prepush
