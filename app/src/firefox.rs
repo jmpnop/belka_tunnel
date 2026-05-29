@@ -256,3 +256,100 @@ pub fn open_download_page() {
         .arg("https://www.mozilla.org/firefox/new/")
         .spawn();
 }
+
+// ---------- Homebrew bootstrap ----------
+
+/// Open Terminal.app with the official Homebrew install command, then poll in
+/// the background until the `brew` binary appears (or the user cancels). When
+/// `then_install_firefox` is true, immediately runs Firefox install once brew
+/// is detected. Notifications keep the user informed.
+pub fn install_homebrew_async(
+    then_install_firefox: bool,
+    notify: impl Fn(&str, &str) + Send + Clone + 'static,
+) {
+    // The official install script. Run inside a fresh Terminal window so the
+    // user can see progress and enter their sudo password.
+    let install_cmd = r#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#;
+    let osascript = format!(
+        r#"tell application "Terminal"
+    activate
+    do script "{}"
+end tell"#,
+        install_cmd.replace('"', "\\\"")
+    );
+    if let Err(e) = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(&osascript)
+        .spawn()
+    {
+        warn!(error = %e, "could not open Terminal for Homebrew install");
+        notify(
+            "Couldn't open Terminal",
+            "Open Terminal manually and run the install command from https://brew.sh",
+        );
+        return;
+    }
+
+    notify(
+        "Installing Homebrew",
+        "Terminal is open — enter your password when prompted. \
+         You'll get another notification when Homebrew is ready.",
+    );
+
+    let notify_for_thread = notify.clone();
+    std::thread::spawn(move || {
+        // Poll every 5s for up to 30 minutes for the brew binary to appear.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if let Some(brew) = locate_brew() {
+                info!(brew = %brew.display(), "Homebrew install detected");
+                notify_for_thread(
+                    "Homebrew installed",
+                    if then_install_firefox {
+                        "Now installing Firefox via Homebrew…"
+                    } else {
+                        "Ready to use. Restart БелкаТуннель to refresh the menu."
+                    },
+                );
+                if then_install_firefox {
+                    let out = std::process::Command::new(&brew)
+                        .args(["install", "--cask", "--force", "firefox"])
+                        .output();
+                    match out {
+                        Ok(o) if o.status.success() => notify_for_thread(
+                            "Firefox is ready",
+                            "Installed via Homebrew. Restart БелкаТуннель to enable the 'Open a private window' item.",
+                        ),
+                        Ok(o) => notify_for_thread(
+                            "Firefox install failed",
+                            &format!(
+                                "brew install returned non-zero:\n{}",
+                                String::from_utf8_lossy(&o.stderr)
+                                    .lines()
+                                    .rev()
+                                    .take(6)
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            ),
+                        ),
+                        Err(e) => notify_for_thread(
+                            "Firefox install failed",
+                            &format!("{e}"),
+                        ),
+                    }
+                }
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                warn!("Homebrew install poll timed out after 30 min");
+                notify_for_thread(
+                    "Homebrew install timed out",
+                    "Couldn't detect brew after 30 minutes. \
+                     If you completed the install, restart БелкаТуннель and try again.",
+                );
+                return;
+            }
+        }
+    });
+}
