@@ -50,7 +50,9 @@ enum UserEvent {
 }
 
 fn main() -> Result<()> {
-    init_tracing();
+    // Hold the WorkerGuard for the entire process lifetime so the non-blocking
+    // log writer thread keeps draining.
+    let _log_guard = init_tracing();
 
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--gui") {
@@ -75,47 +77,52 @@ fn main() -> Result<()> {
         "starting БелкаТуннель"
     );
 
-    // Tokio runtime owns the tunnel and the SOCKS listener.
+    // Single tokio runtime hosts BOTH the tunnel and the status-bridge task.
+    // Previously the status bridge spun up a second current_thread runtime in
+    // its own std::thread just to await a watch channel; that was an entire
+    // executor + I/O driver for one .changed() call. The handle is cloned for
+    // the bridge spawn before the rt itself moves into the tunnel thread.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("belka-tokio")
+        .build()
+        .expect("build tokio runtime");
+    let rt_handle = rt.handle().clone();
+
     let (status_tx, status_rx) = tokio::sync::watch::channel(Status::Connecting);
     let tunnel_ctl = tunnel::Control::new(true);
-    {
-        let profile = profile.clone();
-        let status_tx = status_tx.clone();
-        let tunnel_ctl = tunnel_ctl.clone();
-        std::thread::Builder::new()
-            .name("tokio-tunnel".into())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("build tokio runtime");
-                rt.block_on(tunnel::run_forever(profile, status_tx, tunnel_ctl));
-            })?;
-    }
 
     // tao event loop must run on the main thread for macOS tray to work.
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
-    // Bridge: watch tunnel status and forward as UserEvent to the main loop.
-    {
+    // Status bridge — spawned as a regular tokio task on the shared runtime
+    // BEFORE we move rt into the tunnel thread. The runtime's workers are
+    // already alive by this point, so the task starts polling immediately.
+    rt_handle.spawn({
         let proxy = proxy.clone();
+        async move {
+            let mut rx = status_rx;
+            let initial = rx.borrow().clone();
+            let _ = proxy.send_event(UserEvent::StatusChanged(initial));
+            while rx.changed().await.is_ok() {
+                let s = rx.borrow().clone();
+                let _ = proxy.send_event(UserEvent::StatusChanged(s));
+            }
+        }
+    });
+
+    // Tunnel runs the runtime's block_on on a dedicated std::thread so it
+    // owns the rt for its lifetime; when the tunnel exits, dropping rt aborts
+    // any remaining spawned tasks (notably the status bridge).
+    {
+        let profile = profile.clone();
+        let status_tx = status_tx.clone();
+        let tunnel_ctl = tunnel_ctl.clone();
         std::thread::Builder::new()
-            .name("status-bridge".into())
+            .name("belka-tunnel-rt".into())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("build status bridge runtime");
-                rt.block_on(async move {
-                    let mut rx = status_rx;
-                    let initial = rx.borrow().clone();
-                    let _ = proxy.send_event(UserEvent::StatusChanged(initial));
-                    while rx.changed().await.is_ok() {
-                        let s = rx.borrow().clone();
-                        let _ = proxy.send_event(UserEvent::StatusChanged(s));
-                    }
-                });
+                rt.block_on(tunnel::run_forever(profile, status_tx, tunnel_ctl));
             })?;
     }
 
@@ -465,12 +472,15 @@ fn main() -> Result<()> {
     });
 }
 
-fn init_tracing() {
+/// Initialise tracing. Returns a `WorkerGuard` that must be held alive for
+/// the lifetime of the process — dropping it flushes the non-blocking file
+/// writer. Also installs daily rotation (kept files capped at 7) so a
+/// long-running tunnel doesn't grow an unbounded log.
+fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let log_dir = directories::ProjectDirs::from("io", "celestialtech", "BelkaTunnel")
         .map(|d| d.data_dir().join("logs"))
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
     let _ = std::fs::create_dir_all(&log_dir);
-    let log_path = log_dir.join("proxy-tunnel.log");
 
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
@@ -481,27 +491,34 @@ fn init_tracing() {
 
     let env =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,russh=warn"));
-
     let registry = tracing_subscriber::registry().with(env).with(stderr_layer);
 
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
-        Ok(file) => {
-            let file_layer = tracing_subscriber::fmt::layer()
-                .with_writer(std::sync::Mutex::new(file))
-                .with_ansi(false)
-                .with_target(true);
-            registry.with(file_layer).init();
-            info!(log_file = %log_path.display(), "tracing initialized");
-        }
+    // Daily-rotated file writer; tracing-appender's non-blocking layer drains
+    // into a background thread via a lock-free MPSC, so per-event tracing in
+    // hot async code no longer contends on a Mutex<File> across the tokio
+    // worker pool.
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("proxy-tunnel")
+        .filename_suffix("log")
+        .max_log_files(7)
+        .build(&log_dir);
+    let file_appender = match file_appender {
+        Ok(a) => a,
         Err(e) => {
             registry.init();
-            error!(error = %e, "could not open log file; logging to stderr only");
+            error!(error = %e, "could not set up rolling log file; stderr only");
+            return None;
         }
-    }
+    };
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_target(true);
+    registry.with(file_layer).init();
+    info!(dir = %log_dir.display(), "tracing initialized (rolling, non-blocking)");
+    Some(guard)
 }
 
 /// Enumerate all sockets that match the configured listen address and produce
