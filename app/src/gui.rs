@@ -729,6 +729,47 @@ impl ConfigApp {
                                     if pass.is_empty() { None } else { Some(pass) };
                             }
                         });
+
+                        field(
+                            ui,
+                            "Recorded host-key fingerprint",
+                            Some(
+                                "Filled in automatically the first time the daemon \
+                                 connects. The daemon refuses to connect if the server \
+                                 later presents a different key (possible MITM). \
+                                 Forget the value to re-trust on the next connect — \
+                                 use only if you intentionally rotated the server key.",
+                            ),
+                            |ui| {
+                                ui.horizontal(|ui| {
+                                    let display = profile
+                                        .ssh
+                                        .host_key_fingerprint
+                                        .clone()
+                                        .unwrap_or_else(|| {
+                                            "(none recorded — trust-on-first-use mode)".to_string()
+                                        });
+                                    // Read-only so a typo can't silently break
+                                    // connections; use a TextEdit with the buffer
+                                    // disabled so the value is still selectable
+                                    // for copy / compare against ssh-keyscan.
+                                    let mut shown = display;
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut shown)
+                                            .interactive(false)
+                                            .desired_width(ui.available_width() - 90.0),
+                                    );
+                                    let can_clear =
+                                        profile.ssh.host_key_fingerprint.is_some();
+                                    if ui
+                                        .add_enabled(can_clear, egui::Button::new("  Forget  "))
+                                        .clicked()
+                                    {
+                                        profile.ssh.host_key_fingerprint = None;
+                                    }
+                                });
+                            },
+                        );
                     });
 
                     ui.add_space(18.0);

@@ -139,12 +139,18 @@ fn main() -> Result<()> {
     // any remaining spawned tasks (notably the status bridge).
     {
         let profile = profile.clone();
+        let active_name = file.active.clone();
         let status_tx = status_tx.clone();
         let tunnel_ctl = tunnel_ctl.clone();
         std::thread::Builder::new()
             .name("belka-tunnel-rt".into())
             .spawn(move || {
-                rt.block_on(tunnel::run_forever(profile, status_tx, tunnel_ctl));
+                rt.block_on(tunnel::run_forever(
+                    profile,
+                    active_name,
+                    status_tx,
+                    tunnel_ctl,
+                ));
             })?;
     }
 
@@ -441,6 +447,28 @@ fn main() -> Result<()> {
             _ => None,
         };
         if let Some(UserEvent::StatusChanged(status)) = &user_evt {
+            // Host-key mismatch → loud notification (once per process), since
+            // a silent Disconnected line is exactly the failure mode a real
+            // attacker would want the user to not notice. The static flag
+            // suppresses repeat notifications across reconnect-retry attempts
+            // so the user only gets pinged once until they intervene.
+            if let Status::Disconnected(err) = status {
+                use std::sync::atomic::Ordering;
+                static MITM_NOTIFIED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if err.contains(tunnel::HOST_KEY_MISMATCH_PREFIX)
+                    && MITM_NOTIFIED
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    notify_user(
+                        "Host key changed — refusing to connect",
+                        "The server presented a different host key than the one \
+                         БелкаТуннель recorded. Open Edit Configuration and either \
+                         clear the recorded fingerprint or check what changed.",
+                    );
+                }
+            }
             // Status text — the native check column is rendered by macOS when
             // `set_checked(true)`. For other states the text describes itself.
             let (icon_for_status, body, checked) = match status {

@@ -4,10 +4,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use russh::client::{self, Handle};
 use russh::keys::key;
 use russh::ChannelMsg;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -64,7 +64,17 @@ impl Control {
     }
 }
 
-pub async fn run_forever(config: Arc<Config>, status: watch::Sender<Status>, control: Control) {
+/// Marker prefix used by `run_one_session`'s mismatch error so the menu-bar
+/// loop can recognise host-key failures and fire the once-per-session
+/// notification without resorting to string-sniffing the wrapped chain.
+pub const HOST_KEY_MISMATCH_PREFIX: &str = "host key mismatch";
+
+pub async fn run_forever(
+    config: Arc<Config>,
+    active_profile_name: String,
+    status: watch::Sender<Status>,
+    control: Control,
+) {
     let mut backoff = Duration::from_secs(config.reconnect.initial_backoff_secs);
     let max_backoff = Duration::from_secs(config.reconnect.max_backoff_secs);
     // Long-lived receiver — its "seen version" advances correctly across the
@@ -91,7 +101,7 @@ pub async fn run_forever(config: Arc<Config>, status: watch::Sender<Status>, con
             "establishing SSH session"
         );
 
-        match run_one_session(config.clone(), &status, &control).await {
+        match run_one_session(config.clone(), &active_profile_name, &status, &control).await {
             Ok(()) => {
                 info!("SSH session ended cleanly");
                 backoff = Duration::from_secs(config.reconnect.initial_backoff_secs);
@@ -128,7 +138,30 @@ pub async fn run_forever(config: Arc<Config>, status: watch::Sender<Status>, con
     }
 }
 
-pub struct ClientHandler;
+/// Stable text form of a server host key's SHA-256 fingerprint, suitable for
+/// persistence in config.json and for visual comparison with `ssh-keyscan`
+/// output: `"SHA256:" + base64-no-padding(sha256(key))`.
+pub fn fingerprint_of(pk: &key::PublicKey) -> String {
+    // russh's PublicKey::fingerprint() already returns base64-no-padding of
+    // the SHA-256 hash — we just brand it with the algorithm prefix so it
+    // round-trips identically to OpenSSH's `ssh-keygen -lf` output.
+    format!("SHA256:{}", pk.fingerprint())
+}
+
+pub struct ClientHandler {
+    /// Fingerprint we expect the server to present, in `SHA256:…` form.
+    /// `None` puts the connection in trust-on-first-use mode: we accept
+    /// whatever the server offers and record what we saw via
+    /// `observed_fingerprint`. `Some(_)` enforces equality and refuses
+    /// the connection (returns Ok(false), which russh turns into a
+    /// session-level error) on mismatch.
+    expected_fingerprint: Option<String>,
+    /// Filled in by check_server_key with whatever the server actually
+    /// presented. Sized for cheap polling from the calling function after
+    /// `client::connect` returns, so the TOFU writer can persist the
+    /// observed value.
+    observed_fingerprint: Arc<Mutex<Option<String>>>,
+}
 
 #[async_trait::async_trait]
 impl client::Handler for ClientHandler {
@@ -136,18 +169,43 @@ impl client::Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &key::PublicKey,
+        server_public_key: &key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // TODO: persist + verify host key against config.
-        // For now, trust on first use — same model as `ssh` with
-        // StrictHostKeyChecking=accept-new. Acceptable for a personal tunnel
-        // to a fixed hostname; revisit before redistribution.
-        Ok(true)
+        let observed = fingerprint_of(server_public_key);
+        // Always record what we saw, even on rejection — useful for the
+        // mismatch log and for the user to compare against ssh-keyscan.
+        if let Ok(mut slot) = self.observed_fingerprint.lock() {
+            *slot = Some(observed.clone());
+        }
+        match &self.expected_fingerprint {
+            None => {
+                // Trust-on-first-use: caller will read `observed_fingerprint`
+                // after auth succeeds and persist it to config.json.
+                info!(
+                    fingerprint = %observed,
+                    "trust-on-first-use accepting host key"
+                );
+                Ok(true)
+            }
+            Some(expected) if expected == &observed => {
+                debug!(fingerprint = %observed, "host key matches recorded fingerprint");
+                Ok(true)
+            }
+            Some(expected) => {
+                error!(
+                    expected = %expected,
+                    observed = %observed,
+                    "HOST KEY MISMATCH — refusing connection (possible MITM)"
+                );
+                Ok(false)
+            }
+        }
     }
 }
 
 async fn run_one_session(
     config: Arc<Config>,
+    active_profile_name: &str,
     status: &watch::Sender<Status>,
     control: &Control,
 ) -> Result<()> {
@@ -159,10 +217,36 @@ async fn run_one_session(
     };
     let ssh_cfg = Arc::new(ssh_cfg);
 
+    // Shared slot for the observed fingerprint — filled in by
+    // check_server_key, read by the TOFU writer below after auth succeeds.
+    let observed_fp: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let handler = ClientHandler {
+        expected_fingerprint: config.ssh.host_key_fingerprint.clone(),
+        observed_fingerprint: observed_fp.clone(),
+    };
+
     let addr = (config.ssh.host.as_str(), config.ssh.port);
-    let mut handle = client::connect(ssh_cfg, addr, ClientHandler)
-        .await
-        .with_context(|| format!("connect {}:{}", config.ssh.host, config.ssh.port))?;
+    let mut handle = match client::connect(ssh_cfg, addr, handler).await {
+        Ok(h) => h,
+        Err(e) => {
+            // russh returns the same `russh::Error::Disconnect` for a
+            // server-side disconnect AND for our `check_server_key` returning
+            // Ok(false). Disambiguate by comparing the observed fingerprint
+            // (which we wrote unconditionally) against what we expected; if
+            // they differ, this was a host-key rejection by us, and we want
+            // the caller to surface that to the user.
+            let observed = observed_fp.lock().ok().and_then(|s| s.clone());
+            if let (Some(expected), Some(observed)) = (&config.ssh.host_key_fingerprint, observed) {
+                if expected != &observed {
+                    bail!(
+                        "{HOST_KEY_MISMATCH_PREFIX} — expected {expected}, server presented {observed}"
+                    );
+                }
+            }
+            return Err(e)
+                .with_context(|| format!("connect {}:{}", config.ssh.host, config.ssh.port));
+        }
+    };
 
     let passphrase = config
         .ssh
@@ -179,6 +263,17 @@ async fn run_one_session(
 
     if !authed {
         bail!("publickey authentication rejected");
+    }
+
+    // TOFU writeback: if config didn't have a fingerprint yet, persist what
+    // we just saw. The file-system watcher will pick this up and self-restart
+    // the daemon; the next iteration starts in fingerprint-locked mode.
+    if config.ssh.host_key_fingerprint.is_none() {
+        if let Some(fp) = observed_fp.lock().ok().and_then(|s| s.clone()) {
+            if let Err(e) = persist_tofu_fingerprint(active_profile_name, &fp) {
+                warn!(error = %e, "could not persist TOFU fingerprint (will retry next connect)");
+            }
+        }
     }
 
     let handle = Arc::new(handle);
@@ -227,6 +322,40 @@ async fn run_one_session(
             .await;
     }
     result
+}
+
+/// Write a freshly-observed host-key fingerprint into the persisted
+/// config.json for the given profile. Called once after the first successful
+/// connection on a TOFU-mode profile; the file-system watcher then picks
+/// the change up and self-restarts the daemon into fingerprint-locked mode.
+///
+/// Subtlety: we load the file fresh from disk (rather than mutating our
+/// in-memory `Config` which is just one profile out of the whole file) so
+/// that any concurrent edits the user has made to OTHER profiles aren't
+/// stomped by our targeted save.
+fn persist_tofu_fingerprint(profile_name: &str, fingerprint: &str) -> Result<()> {
+    use crate::config::ConfigFile;
+    let path = ConfigFile::default_path().ok_or_else(|| anyhow!("no config path available"))?;
+    let mut file = ConfigFile::load(&path)
+        .with_context(|| format!("re-reading {} for TOFU writeback", path.display()))?;
+    let prof = file
+        .profiles
+        .get_mut(profile_name)
+        .ok_or_else(|| anyhow!("profile {profile_name} vanished from config"))?;
+    if prof.ssh.host_key_fingerprint.is_some() {
+        // Someone else (the user, presumably) wrote a fingerprint between our
+        // load and our save. Don't stomp their value.
+        return Ok(());
+    }
+    prof.ssh.host_key_fingerprint = Some(fingerprint.to_string());
+    file.save(&path)?;
+    info!(
+        path = %path.display(),
+        profile = %profile_name,
+        fingerprint = %fingerprint,
+        "recorded TOFU host-key fingerprint",
+    );
+    Ok(())
 }
 
 /// Open a direct-tcpip channel through the SSH session.
@@ -325,6 +454,146 @@ pub type ClientHandle = Arc<Handle<ClientHandler>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::client::Handler;
+    use russh::keys::key::KeyPair;
+
+    /// Round-trip: load a fresh ed25519 keypair, ask russh-keys for its
+    /// fingerprint, and assert our helper prefixes it as "SHA256:".
+    /// This pins the wire format we persist to disk so it stays compatible
+    /// with `ssh-keygen -l -E sha256 -f known_hosts` output.
+    #[test]
+    fn fingerprint_of_is_sha256_prefixed_and_stable() {
+        let kp = KeyPair::generate_ed25519().expect("ed25519 keygen");
+        let pk = kp.clone_public_key().unwrap();
+        let fp = fingerprint_of(&pk);
+        assert!(fp.starts_with("SHA256:"), "missing prefix: {fp}");
+        // Base64 body (after the prefix) is sha256(32 bytes) = 43 chars in
+        // base64-no-padding.
+        let body = &fp["SHA256:".len()..];
+        assert_eq!(body.len(), 43, "unexpected fingerprint length: {fp}");
+        // Calling twice on the same key must produce the same string.
+        assert_eq!(fp, fingerprint_of(&pk), "fingerprint not deterministic");
+    }
+
+    /// Two distinct keypairs must hash to different fingerprints. (Trivial
+    /// for SHA-256, but the test guards against a future refactor that
+    /// accidentally hashes a constant or mis-encodes the key bytes.)
+    #[test]
+    fn fingerprint_of_differs_between_keys() {
+        let a = KeyPair::generate_ed25519().expect("ed25519 keygen");
+        let b = KeyPair::generate_ed25519().expect("ed25519 keygen");
+        let fa = fingerprint_of(&a.clone_public_key().unwrap());
+        let fb = fingerprint_of(&b.clone_public_key().unwrap());
+        assert_ne!(fa, fb, "two random keys produced the same fingerprint");
+    }
+
+    /// TOFU mode: with no expected fingerprint, accept whatever the server
+    /// presents and store the observed value where the caller can pick it up.
+    #[tokio::test]
+    async fn check_server_key_tofu_accepts_and_records() {
+        let kp = KeyPair::generate_ed25519().expect("ed25519 keygen");
+        let pk = kp.clone_public_key().unwrap();
+        let observed = Arc::new(Mutex::new(None));
+        let mut h = ClientHandler {
+            expected_fingerprint: None,
+            observed_fingerprint: observed.clone(),
+        };
+        let ok = h.check_server_key(&pk).await.unwrap();
+        assert!(ok, "TOFU must accept");
+        let recorded = observed.lock().unwrap().clone();
+        assert_eq!(recorded.as_deref(), Some(fingerprint_of(&pk).as_str()));
+    }
+
+    /// Locked mode matching: same key + same expected → accept.
+    #[tokio::test]
+    async fn check_server_key_locked_accepts_match() {
+        let kp = KeyPair::generate_ed25519().expect("ed25519 keygen");
+        let pk = kp.clone_public_key().unwrap();
+        let fp = fingerprint_of(&pk);
+        let observed = Arc::new(Mutex::new(None));
+        let mut h = ClientHandler {
+            expected_fingerprint: Some(fp.clone()),
+            observed_fingerprint: observed.clone(),
+        };
+        assert!(h.check_server_key(&pk).await.unwrap());
+        // Even on accept we record the observed value for parity.
+        assert_eq!(observed.lock().unwrap().as_deref(), Some(fp.as_str()));
+    }
+
+    /// Locked mode mismatch: different key than expected → refuse
+    /// (Ok(false), which russh converts to a session error). The observed
+    /// value MUST still be recorded so the caller can surface it.
+    #[tokio::test]
+    async fn check_server_key_locked_refuses_mismatch() {
+        let real_kp = KeyPair::generate_ed25519().expect("ed25519 keygen");
+        let imposter_kp = KeyPair::generate_ed25519().expect("ed25519 keygen");
+        let real_pk = real_kp.clone_public_key().unwrap();
+        let imposter_pk = imposter_kp.clone_public_key().unwrap();
+        let observed = Arc::new(Mutex::new(None));
+        let mut h = ClientHandler {
+            expected_fingerprint: Some(fingerprint_of(&real_pk)),
+            observed_fingerprint: observed.clone(),
+        };
+        let ok = h.check_server_key(&imposter_pk).await.unwrap();
+        assert!(!ok, "mismatch must refuse");
+        // Caller depends on the observed value being recorded even on refuse —
+        // otherwise the surfaced error message couldn't include 'server
+        // presented X' and the user can't compare to ssh-keyscan.
+        assert_eq!(
+            observed.lock().unwrap().as_deref(),
+            Some(fingerprint_of(&imposter_pk).as_str())
+        );
+    }
+
+    /// End-to-end persistence: write a fresh config, simulate the TOFU
+    /// writeback function picking up a new fingerprint, verify the file
+    /// on disk now carries it.
+    /// We can't easily exercise `persist_tofu_fingerprint` because it
+    /// reads `ConfigFile::default_path()` (which is OS-wide); instead we
+    /// reproduce its body inline against a tempdir path and assert the
+    /// invariants that matter: (a) only the targeted profile's
+    /// fingerprint changes, (b) other profiles' fields stay intact,
+    /// (c) the on-disk file remains valid JSON parseable by `load`.
+    #[test]
+    fn tofu_writeback_only_modifies_target_profile_fingerprint() {
+        use crate::config::{ConfigFile, Profile};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        let mut file = ConfigFile::default();
+        // Two profiles so we can prove the writeback is targeted.
+        file.profiles
+            .insert("other".to_string(), Profile::default());
+        // Customise "other" so we can detect if it got stomped.
+        file.profiles.get_mut("other").unwrap().ssh.user = "marker".to_string();
+        file.save(&path).unwrap();
+        // Now simulate persist: load, mutate active profile only, save.
+        let mut reloaded = ConfigFile::load(&path).unwrap();
+        let prof = reloaded.profiles.get_mut("default").unwrap();
+        assert!(prof.ssh.host_key_fingerprint.is_none(), "preconditions");
+        prof.ssh.host_key_fingerprint = Some("SHA256:test-fingerprint".to_string());
+        reloaded.save(&path).unwrap();
+        // Verify on-disk file.
+        let final_file = ConfigFile::load(&path).unwrap();
+        assert_eq!(
+            final_file.profiles["default"]
+                .ssh
+                .host_key_fingerprint
+                .as_deref(),
+            Some("SHA256:test-fingerprint")
+        );
+        // Other profile unchanged.
+        assert!(
+            final_file.profiles["other"]
+                .ssh
+                .host_key_fingerprint
+                .is_none(),
+            "non-target profile's fingerprint should not have been touched"
+        );
+        assert_eq!(
+            final_file.profiles["other"].ssh.user, "marker",
+            "non-target profile's fields should be preserved"
+        );
+    }
 
     #[test]
     fn control_initial_value() {

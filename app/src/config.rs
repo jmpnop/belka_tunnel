@@ -20,6 +20,17 @@ pub struct SshConfig {
     #[serde(default)]
     pub key_passphrase: Option<String>,
     pub keepalive_secs: u64,
+    /// SHA-256 fingerprint of the server's host key, in the same
+    /// `SHA256:<base64-no-padding>` form OpenSSH prints. When None the
+    /// daemon is in trust-on-first-use mode: it accepts whatever the
+    /// server presents on the next connect and persists the observed
+    /// fingerprint here automatically. When Some, the daemon refuses
+    /// to connect unless the server presents exactly that key (and a
+    /// mismatch surfaces in the menu + a notification).
+    ///
+    /// Serde default = None so existing configs upgrade cleanly.
+    #[serde(default)]
+    pub host_key_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -55,6 +66,7 @@ impl Default for Profile {
                 key_path: PathBuf::from(format!("{home}/.ssh/id_ed25519")),
                 key_passphrase: None,
                 keepalive_secs: 30,
+                host_key_fingerprint: None,
             },
             socks: SocksConfig {
                 // 0.0.0.0 → listen on all IPv4 interfaces so other devices on
