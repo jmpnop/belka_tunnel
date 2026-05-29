@@ -351,7 +351,20 @@ fn install_firefox_direct() -> Result<()> {
     // Mozilla's stable redirector — picks the right architecture automatically.
     let url = "https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US";
     let dl = std::process::Command::new("/usr/bin/curl")
-        .args(["-fL", "--silent", "--show-error", "-o"])
+        .args([
+            "-fL",
+            "--silent",
+            "--show-error",
+            // Total-time cap: a hung Mozilla redirector would otherwise pin
+            // the install thread (and its BUSY guard) for the whole process
+            // lifetime, blocking further install attempts until restart.
+            // 10 minutes accommodates a ~120 MB DMG on a slow link
+            // (~200 KB/s = 600 s); anyone slower than that has bigger
+            // problems and will appreciate the early failure.
+            "--max-time",
+            "600",
+            "-o",
+        ])
         .arg(&tmp_dmg.0)
         .arg(url)
         .output()
