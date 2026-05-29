@@ -302,13 +302,20 @@ impl ConfigApp {
     }
 
     fn save(&mut self) {
+        // Pre-flight: catch invariant violations before writing the file so the
+        // user sees the actual reason instead of the daemon silently rejecting
+        // the file on its next auto-reload.
+        if let Err(e) = self.file.validate() {
+            self.last_status = Some((StatusKind::Error, format!("Invalid config: {e}")));
+            return;
+        }
         match ConfigFile::default_path() {
             Some(path) => match self.file.save(&path) {
                 Ok(()) => {
                     self.last_status = Some((
                         StatusKind::Success,
                         format!(
-                            "Saved to {}. Restart from the menu bar to apply.",
+                            "Saved to {}. The tunnel will reload automatically.",
                             path.display()
                         ),
                     ));
@@ -853,7 +860,7 @@ impl ConfigApp {
                             .inner_margin(Margin::same(14.0))
                             .show(ui, |ui| {
                                 ui.label(
-                                    RichText::new("This is the active profile. After saving, click Restart in the menu bar to apply changes.")
+                                    RichText::new("This is the active profile. Changes apply automatically when you save — the tunnel reloads in place.")
                                         .color(theme::TEXT_PRIMARY)
                                         .size(12.0),
                                 );
