@@ -67,6 +67,122 @@ deployment — what we already set, what we could add, and which ones to avoid.
 
 ---
 
+## Russian-locale scrubbing (deep dive)
+
+A US-IP tunnel + UTC timezone is undone by an `Accept-Language: ru` header.
+Sites and bots fingerprint heavily on locale signals because they're stable
+across IP changes. The policy now scrubs every channel that could leak a
+Russian system:
+
+### 1. HTTP `Accept-Language` header
+Set by Firefox to whatever `intl.accept_languages` says. We lock it to
+`en-US, en` — same as a fresh US install.
+```json
+"intl.accept_languages": { "Value": "en-US, en", "Status": "locked" }
+```
+
+### 2. `navigator.language` / `navigator.languages` JS APIs
+Driven by `intl.locale.requested` and the OS-locale fallback. We lock
+`intl.locale.requested = en-US`, plus disable the fallbacks:
+```json
+"intl.locale.requested":              { "Value": "en-US", "Status": "locked" },
+"intl.locale.matchOS":                { "Value": false,   "Status": "locked" },
+"intl.regional_prefs.use_os_locales": { "Value": false,   "Status": "locked" },
+"general.useragent.locale":           { "Value": "en-US", "Status": "locked" }
+```
+The last one is legacy but still read by some Firefox code paths and add-ons.
+
+### 3. `Date()` / `Intl.DateTimeFormat()` localization
+By default Firefox uses the OS locale for number/date/currency formatting,
+so a Russian system formats dates as `28.05.2026`, decimals as `1,5`, and
+currency as `₽1 000,50`. `resistFingerprinting` normalizes these to en-US,
+and we add a belt:
+```json
+"javascript.use_us_english_locale": { "Value": true, "Status": "locked" }
+```
+This forces `Date.toLocaleString()` etc. to en-US even when RFP is
+somehow disabled.
+
+### 4. Default search engine (Yandex / Mail.ru)
+Firefox auto-swaps the default search engine to Yandex in RU/UA/BY at first
+launch, even with no user interaction — single biggest "this user is Russian"
+signal. We override + lock with the `SearchEngines` policy:
+```json
+"SearchEngines": {
+  "Default": "Google",
+  "PreventInstalls": false,
+  "Remove": ["Яндекс", "Mail.ru"]
+}
+```
+Google is what a generic en-US user has. DuckDuckGo would be more private
+but also a "privacy user" signal — Google is the most generic choice.
+
+### 5. Search & URL-bar suggestions
+Suggestions are routed through the default search engine, locale-aware
+endpoints, and quietly echo the user's locale in every query. Disabled:
+```json
+"browser.search.suggest.enabled":  { "Value": false, "Status": "locked" },
+"browser.urlbar.suggest.searches": { "Value": false, "Status": "locked" },
+"browser.urlbar.suggest.engines":  { "Value": false, "Status": "locked" }
+```
+
+### 6. New tab page sponsored / topstories content
+Pocket-driven, locale-aware feed of "stories" on the new tab — by default
+shows Russian content if your locale says Russian. We turn the whole feed
+off:
+```json
+"browser.newtabpage.activity-stream.feeds.section.topstories":         { "Value": false },
+"browser.newtabpage.activity-stream.showSponsored":                    { "Value": false },
+"browser.newtabpage.activity-stream.showSponsoredTopSites":            { "Value": false },
+"browser.newtabpage.activity-stream.section.highlights.includePocket": { "Value": false },
+"browser.discovery.enabled":                                           { "Value": false }
+```
+
+### 7. Translation popup
+The "Translate this page?" banner appears when the page language ≠ user's
+locale. Even if the user dismisses it, the popup itself proves the browser
+considers the page foreign — which is informative if RFP wasn't perfect.
+Disabled:
+```json
+"browser.translations.automaticPopup": { "Value": false, "Status": "locked" },
+"browser.translations.enable":         { "Value": false, "Status": "locked" }
+```
+
+### 8. Mozilla "region update" service
+Firefox periodically re-detects your country and updates the regional
+default search engine. Even if we set Google as default today, the region
+update could swap it to Yandex tomorrow when the tunnel IP changes or
+maintenance lets the lookup leak. Disabled:
+```json
+"browser.region.update.enabled": { "Value": false, "Status": "locked" },
+"browser.search.geoip.url":      { "Value": "",    "Status": "locked" }
+```
+
+### 9. Spellchecker dictionary
+Firefox auto-selects a Russian dictionary based on OS locale; the
+`spellchecker.dictionary` pref's value is queryable from extensions and
+some sites. We lock it to `en-US`:
+```json
+"spellchecker.dictionary": { "Value": "en-US", "Status": "locked" }
+```
+
+### 10. What we deliberately don't scrub
+- **Bookmarks** — your Russian bookmarks are yours; we don't touch them.
+- **History / passwords** — same.
+- **Installed dictionaries** — we lock the *active* dictionary, not the
+  installed ones. Russian dictionary remains available if you ever need it.
+- **The user's actual typing** — if you type Cyrillic into the URL bar
+  or search box, that obviously goes through the tunnel as Cyrillic. No
+  policy can hide that.
+
+### Verifying the scrub
+Open Firefox after install/reinstall, visit:
+- <https://browserleaks.com/ip> → IP = 173.77.254.243, headers should show `Accept-Language: en-US,en;q=0.5`, timezone UTC, language en-US.
+- <https://www.whatismybrowser.com/detect/what-is-my-language> → reports en-US.
+- `about:config?filter=intl.` → `intl.accept_languages` and `intl.locale.requested` shown as locked.
+
+---
+
 ## Fingerprinting resistance (deep dive)
 
 A clean SOCKS5 tunnel hides your IP. It does **not** hide your browser. Sites

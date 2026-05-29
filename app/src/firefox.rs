@@ -224,6 +224,11 @@ pub fn install_firefox_policies(bundle: &Path, socks_host: &str, socks_port: u16
       "Mode": "disable_non_proxied_udp",
       "Locked": true
     }},
+    "SearchEngines": {{
+      "Default": "Google",
+      "PreventInstalls": false,
+      "Remove": ["Яндекс", "Mail.ru"]
+    }},
     "Permissions": {{
       "Geolocation": {{ "BlockNewRequests": true, "Locked": true }},
       "Camera":      {{ "BlockNewRequests": true, "Locked": true }},
@@ -254,8 +259,31 @@ pub fn install_firefox_policies(bundle: &Path, socks_host: &str, socks_port: u16
       "network.http.referer.XOriginTrimmingPolicy":         {{ "Value": 2,     "Status": "locked" }},
       "network.http.sendRefererHeader":                     {{ "Value": 1,     "Status": "locked" }},
 
-      "intl.accept_languages":                              {{ "Value": "en-US, en", "Status": "locked" }},
-      "intl.locale.requested":                              {{ "Value": "en-US",     "Status": "locked" }}
+      "intl.accept_languages":                              {{ "Value": "en-US, en",  "Status": "locked" }},
+      "intl.locale.requested":                              {{ "Value": "en-US",      "Status": "locked" }},
+      "intl.locale.matchOS":                                {{ "Value": false,        "Status": "locked" }},
+      "intl.regional_prefs.use_os_locales":                 {{ "Value": false,        "Status": "locked" }},
+      "general.useragent.locale":                           {{ "Value": "en-US",      "Status": "locked" }},
+
+      "spellchecker.dictionary":                            {{ "Value": "en-US",      "Status": "locked" }},
+
+      "browser.search.suggest.enabled":                     {{ "Value": false,        "Status": "locked" }},
+      "browser.urlbar.suggest.searches":                    {{ "Value": false,        "Status": "locked" }},
+      "browser.urlbar.suggest.engines":                     {{ "Value": false,        "Status": "locked" }},
+
+      "browser.newtabpage.activity-stream.feeds.section.topstories": {{ "Value": false, "Status": "locked" }},
+      "browser.newtabpage.activity-stream.showSponsored":            {{ "Value": false, "Status": "locked" }},
+      "browser.newtabpage.activity-stream.showSponsoredTopSites":    {{ "Value": false, "Status": "locked" }},
+      "browser.newtabpage.activity-stream.section.highlights.includePocket": {{ "Value": false, "Status": "locked" }},
+      "browser.discovery.enabled":                          {{ "Value": false,        "Status": "locked" }},
+
+      "browser.translations.automaticPopup":                {{ "Value": false,        "Status": "locked" }},
+      "browser.translations.enable":                        {{ "Value": false,        "Status": "locked" }},
+
+      "browser.region.update.enabled":                      {{ "Value": false,        "Status": "locked" }},
+      "browser.search.geoip.url":                           {{ "Value": "",           "Status": "locked" }},
+
+      "javascript.use_us_english_locale":                   {{ "Value": true,         "Status": "locked" }}
     }},
     "DisableSecurityBypass": false,
     "DisableTelemetry":        true,
