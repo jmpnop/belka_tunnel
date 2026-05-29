@@ -127,15 +127,12 @@ struct EditBuffer {
     authorized_keys: String,
     priv_list: Vec<String>,
     disabled: bool,
-    /// Text representation of group memberships — newline-separated names.
-    /// Edited as a free-form text area in the GUI; on save, parsed into
-    /// trimmed non-empty lines and sent as `Some(...)` to pfsense::update_user
-    /// (authoritative, so an empty buffer means "strip all memberships").
-    groups_text: String,
-    /// True when the user has actually touched the groups field. We send
-    /// `Some(parsed)` only in that case — otherwise `None`, which preserves
-    /// existing memberships untouched (the audit's "default safe" path).
-    groups_dirty: bool,
+    // No group memberships field. pfSense's group model on Pasha's
+    // setup is just two groups: 'all' (implicit, every user) and
+    // 'admins' (root-only, gives page-all). Non-admin users like
+    // olga should never be in 'admins'; nothing else exists to put
+    // them in. pfsense::update_user's groups: None preserves
+    // whatever's on the router so we don't accidentally touch it.
 }
 
 #[derive(Default)]
@@ -291,30 +288,15 @@ impl App {
             s.pending_op = Some(format!("Saving {}…", buf.name));
         }
         self.rt.spawn(async move {
-            // Only ship `groups` if the user actually edited the field. An
-            // untouched field sends None so existing memberships survive —
-            // the audit's "default safe" path. A touched-but-empty field
-            // means the user deliberately wants the user stripped from
-            // every group (except `all`, which pfsense::update_user re-adds).
-            let groups_payload: Option<Vec<String>> = if buf.groups_dirty {
-                Some(
-                    buf.groups_text
-                        .lines()
-                        .map(str::trim)
-                        .filter(|l| !l.is_empty())
-                        .map(str::to_string)
-                        .collect(),
-                )
-            } else {
-                None
-            };
             let req = pfsense::UpdateUserReq {
                 name: &buf.name,
                 descr: Some(buf.descr.as_str()),
                 priv_list: Some(buf.priv_list.clone()),
                 authorized_keys: Some(buf.authorized_keys.as_str()),
                 disabled: Some(buf.disabled),
-                groups: groups_payload,
+                // None preserves whatever the router currently has —
+                // pfusers doesn't expose group editing in the UI.
+                groups: None,
             };
             let r = pfsense::update_user(&handle, req).await;
             // Refresh after, so the UI reflects the canonical server state.
@@ -634,12 +616,6 @@ impl App {
                                 authorized_keys: u.authorized_keys.clone(),
                                 priv_list: u.priv_list.clone(),
                                 disabled: u.disabled,
-                                // Pre-fill the groups text from server state but
-                                // mark NOT dirty — the user hasn't expressed a
-                                // change yet, so a Save without touching the
-                                // groups field preserves the existing memberships.
-                                groups_text: u.groups.join("\n"),
-                                groups_dirty: false,
                             });
                         }
                         ui.add_space(6.0);
@@ -743,54 +719,13 @@ impl App {
                     });
                     ui.add_space(14.0);
 
-                    card(ui, |ui| {
-                        section_title(
-                            ui,
-                            "Group memberships",
-                            Some(
-                                "One group name per line (e.g. 'admins'). Saving an EMPTY \
-                                 field strips the user from every group except 'all'. Leaving \
-                                 the field UNTOUCHED preserves current memberships.",
-                            ),
-                        );
-                        // Hint text must NOT look like a plausible real value —
-                        // earlier we used 'admins\nvpn-users' as a hint, and
-                        // because pfSense actually has an 'admins' group it
-                        // looked like the field was populated when it wasn't.
-                        // Using a parenthesised instruction makes the empty
-                        // state unambiguous.
-                        let resp = ui.add(
-                            egui::TextEdit::multiline(&mut buf.groups_text)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_rows(4)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("(no groups — type names here)"),
-                        );
-                        if resp.changed() {
-                            buf.groups_dirty = true;
-                        }
-                        let dirty_marker = if buf.groups_dirty { " · edited" } else { "" };
-                        let group_count = buf
-                            .groups_text
-                            .lines()
-                            .filter(|l| !l.trim().is_empty())
-                            .count();
-                        ui.label(
-                            RichText::new(format!("{group_count} groups{dirty_marker}"))
-                                .color(theme::TEXT_FAINT)
-                                .size(11.0),
-                        );
-                        ui.add_space(4.0);
-                        if ghost_button(ui, "  Reset to server value  ").clicked() {
-                            // Re-fetch from the current user-list snapshot.
-                            let users = self.state.lock().unwrap().users.clone();
-                            if let Some(u) = users.iter().find(|u| u.name == buf.name) {
-                                buf.groups_text = u.groups.join("\n");
-                                buf.groups_dirty = false;
-                            }
-                        }
-                    });
-                    ui.add_space(14.0);
+                    // Group memberships card removed: on Pasha's pfSense
+                    // the only groups are 'all' (implicit) and 'admins'
+                    // (root, page-all), and non-admin users belong in
+                    // neither beyond 'all'. The engine still supports
+                    // group edits via UpdateUserReq.groups; the GUI just
+                    // never sets that field, so memberships round-trip
+                    // unchanged.
 
                     card(ui, |ui| {
                         section_title(
@@ -841,8 +776,6 @@ impl App {
                             authorized_keys: b.authorized_keys.clone(),
                             priv_list: b.priv_list.clone(),
                             disabled: b.disabled,
-                            groups_text: b.groups_text.clone(),
-                            groups_dirty: b.groups_dirty,
                         };
                         self.spawn_save_user(clone);
                     }
