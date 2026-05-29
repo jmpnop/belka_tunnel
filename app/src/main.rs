@@ -732,20 +732,43 @@ fn decode_icon(bytes: &[u8]) -> Result<Icon> {
     Icon::from_rgba(img.into_raw(), w, h).map_err(|e| anyhow::anyhow!("build tray icon: {e}"))
 }
 
-fn spawn_gui() {
+/// Two slots for the at-most-one subprocess of each window kind. `Child` is
+/// retained so `try_wait` can tell us whether the previous spawn is still
+/// alive — without this, every click on "Edit Configuration…" / "About"
+/// stacked another window on the screen.
+static GUI_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+static ABOUT_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+/// Spawn a subprocess of our own executable with `arg` (e.g. "--gui"), unless
+/// the previous spawn is still running. The previous `Child` is kept around
+/// in `slot` and reaped lazily via `try_wait`: on the next click, if the
+/// process exited (window closed) we replace it; if still alive, we no-op
+/// so the user doesn't pile up duplicate windows.
+fn spawn_subprocess(slot: &std::sync::Mutex<Option<std::process::Child>>, arg: &str) {
+    let mut guard = slot.lock().unwrap();
+    if let Some(child) = guard.as_mut() {
+        match child.try_wait() {
+            Ok(Some(_)) => {}   // exited — fall through and respawn
+            Ok(None) => return, // still alive — leave it
+            Err(_) => {}        // can't tell — assume dead, respawn
+        }
+    }
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
-    let _ = std::process::Command::new(exe).arg("--gui").spawn();
+    match std::process::Command::new(exe).arg(arg).spawn() {
+        Ok(child) => *guard = Some(child),
+        Err(e) => warn!(arg, error = %e, "could not spawn subprocess"),
+    }
+}
+
+fn spawn_gui() {
+    spawn_subprocess(&GUI_CHILD, "--gui");
 }
 
 fn spawn_about() {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let _ = std::process::Command::new(exe).arg("--about").spawn();
+    spawn_subprocess(&ABOUT_CHILD, "--about");
 }
 
 fn relaunch_self() {
