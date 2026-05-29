@@ -134,6 +134,12 @@ def verify_pfusers() -> None:
     verify.verify_pfusers_bundle()
 
 
+@verify_app.command("pfusers-dmg")
+def verify_pfusers_dmg_cmd() -> None:
+    """Mount the latest pfUsers DMG and check it contains the .app + /Applications link."""
+    dmg.verify_pfusers_dmg()
+
+
 # ---------- DMG ----------
 
 
@@ -141,6 +147,12 @@ def verify_pfusers() -> None:
 def cmd_dmg() -> None:
     """Build dist/BelkaTunnel-<version>.dmg (uses dmgbuild + the voxel-tree bg)."""
     dmg.build_dmg()
+
+
+@app.command(name="dmg-pfusers")
+def cmd_dmg_pfusers() -> None:
+    """Build pfusers/dist/pfUsers-<version>.dmg from the bundled pfUsers.app."""
+    dmg.build_pfusers_dmg()
 
 
 @app.command(name="notarize")
