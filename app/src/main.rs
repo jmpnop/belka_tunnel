@@ -1,6 +1,7 @@
 #![recursion_limit = "512"]
 
 mod about;
+mod autolaunch;
 mod config;
 mod config_watcher;
 mod firefox;
@@ -262,6 +263,8 @@ fn main() -> Result<()> {
     let edit_config_item = MenuItem::new("Edit Configuration…", true, None);
     let reveal_data_item = MenuItem::new("Reveal Data Folder in Finder", true, None);
     let open_logs_item = MenuItem::new("Open Log File", true, None);
+    let launch_at_login_item =
+        CheckMenuItem::new("Launch at Login", true, autolaunch::is_enabled(), None);
     let about_item = MenuItem::new("О БелкаТуннеле", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
 
@@ -281,6 +284,7 @@ fn main() -> Result<()> {
     menu.append(&reveal_data_item)?;
     menu.append(&open_logs_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
+    menu.append(&launch_at_login_item)?;
     menu.append(&about_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit_item)?;
@@ -304,6 +308,7 @@ fn main() -> Result<()> {
     let tray_channel = TrayIconEvent::receiver();
     let quit_id = quit_item.id().clone();
     let about_id = about_item.id().clone();
+    let launch_at_login_id = launch_at_login_item.id().clone();
     let open_firefox_id = open_firefox_item.id().clone();
     let edit_config_id = edit_config_item.id().clone();
     let reveal_data_id = reveal_data_item.id().clone();
@@ -334,6 +339,42 @@ fn main() -> Result<()> {
                 *control_flow = ControlFlow::Exit;
             } else if event.id == about_id {
                 spawn_about();
+            } else if event.id == launch_at_login_id {
+                // muda's CheckMenuItem toggles its checked state on click
+                // BEFORE delivering the event, so .is_checked() now reflects
+                // the user's desired NEW state.
+                let want_on = launch_at_login_item.is_checked();
+                let result = if want_on {
+                    autolaunch::current_bundle_binary()
+                        .ok_or_else(|| anyhow::anyhow!("could not resolve own binary path"))
+                        .and_then(|p| autolaunch::enable(&p))
+                } else {
+                    autolaunch::disable()
+                };
+                match result {
+                    Ok(()) => {
+                        if want_on {
+                            notify_user(
+                                "Launch at Login enabled",
+                                "БелкаТуннель will start automatically the next time you log in.",
+                            );
+                        } else {
+                            notify_user(
+                                "Launch at Login disabled",
+                                "БелкаТуннель will not start automatically at next login.",
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, want_on, "autolaunch toggle failed");
+                        // Roll the checkbox back so the menu reflects reality.
+                        launch_at_login_item.set_checked(!want_on);
+                        notify_user(
+                            "Launch at Login: couldn't apply",
+                            &format!("{e}. Open Log File for details."),
+                        );
+                    }
+                }
             } else if event.id == status_toggle_id {
                 let new_enabled = !tunnel_ctl.is_enabled();
                 tunnel_ctl.set_enabled(new_enabled);

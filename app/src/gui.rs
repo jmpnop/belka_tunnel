@@ -893,6 +893,62 @@ impl ConfigApp {
 
                     ui.add_space(18.0);
 
+                    // Behavior card — for global (not per-profile) settings.
+                    // Currently just autolaunch; logical place to hang
+                    // future things like 'Show notifications', etc.
+                    card(ui, |ui| {
+                        section_title(
+                            ui,
+                            "Behavior",
+                            Some("System integration. Applies to БелкаТуннель as a whole, not just this profile."),
+                        );
+                        ui.horizontal(|ui| {
+                            // Source of truth is the LaunchAgent plist file on
+                            // disk — query it every render so the menu-bar
+                            // toggle and this control stay in sync without
+                            // explicit IPC between the two processes.
+                            let mut on = crate::autolaunch::is_enabled();
+                            if ui
+                                .add(toggle_widget("Launch at login", &mut on))
+                                .changed()
+                            {
+                                let result = if on {
+                                    crate::autolaunch::current_bundle_binary()
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("could not resolve own binary path")
+                                        })
+                                        .and_then(|p| crate::autolaunch::enable(&p))
+                                } else {
+                                    crate::autolaunch::disable()
+                                };
+                                self.last_status = Some(match result {
+                                    Ok(()) if on => (
+                                        StatusKind::Success,
+                                        "Will start at next login.".to_string(),
+                                    ),
+                                    Ok(()) => (
+                                        StatusKind::Success,
+                                        "Won't start automatically anymore.".to_string(),
+                                    ),
+                                    Err(e) => (
+                                        StatusKind::Error,
+                                        format!("Couldn't update launch-at-login: {e}"),
+                                    ),
+                                });
+                            }
+                            ui.label(
+                                RichText::new(
+                                    "Writes ~/Library/LaunchAgents/io.celestialtech.BelkaTunnel.plist. \
+                                     The change takes effect on your next login.",
+                                )
+                                .color(theme::TEXT_MUTED)
+                                .size(11.5),
+                            );
+                        });
+                    });
+
+                    ui.add_space(18.0);
+
                     if is_active {
                         Frame::none()
                             .fill(theme::ACCENT.linear_multiply(0.10))
