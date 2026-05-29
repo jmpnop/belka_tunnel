@@ -5,7 +5,6 @@ use eframe::egui::{
 };
 use include_dir::{include_dir, Dir};
 
-const ABOUT_BG_PNG: &[u8] = include_bytes!("../assets/about-bg.png");
 static BT_FRAMES_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/bt-frames");
 const FRAME_FPS: f32 = 12.0;
 
@@ -124,7 +123,6 @@ const PAD: f32 = 28.0;
 const IMAGE_FRACTION: f32 = 0.46;
 
 struct AboutApp {
-    bg_handle: Option<egui::TextureHandle>,
     frames: Vec<egui::TextureHandle>,
     started: std::time::Instant,
     first_frame: bool,
@@ -133,9 +131,6 @@ struct AboutApp {
 
 impl AboutApp {
     fn new(ctx: &egui::Context) -> Self {
-        let bg_handle = decode_image(ABOUT_BG_PNG)
-            .map(|img| ctx.load_texture("about-bg", img, egui::TextureOptions::LINEAR));
-
         // Pre-decode all video frames into GPU textures (~63 × 360×360 RGBA).
         let mut frame_files: Vec<&include_dir::File> = BT_FRAMES_DIR
             .files()
@@ -168,22 +163,12 @@ impl AboutApp {
         tracing::info!(frames = frames.len(), "loaded animation frames");
 
         Self {
-            bg_handle,
             frames,
             started: std::time::Instant::now(),
             first_frame: true,
             expanded_credits: false,
         }
     }
-}
-
-fn decode_image(bytes: &[u8]) -> Option<egui::ColorImage> {
-    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
-    let (w, h) = img.dimensions();
-    Some(egui::ColorImage::from_rgba_unmultiplied(
-        [w as usize, h as usize],
-        img.as_raw(),
-    ))
 }
 
 impl eframe::App for AboutApp {
@@ -217,16 +202,21 @@ impl eframe::App for AboutApp {
                 );
                 painter.rect_filled(image_rect, Rounding::ZERO, Color32::BLACK);
 
-                // Prefer the animated video frame; fall back to the still BG if frames missing.
-                let current_tex = if !self.frames.is_empty() {
+                // Animation runs only while the window is focused/visible —
+                // a dropped-from-view About window otherwise burns 12fps of GPU
+                // for nothing.
+                let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+                let current_tex = if self.frames.is_empty() {
+                    None
+                } else {
                     let elapsed = self.started.elapsed().as_secs_f32();
                     let idx = (elapsed * FRAME_FPS) as usize % self.frames.len();
-                    ctx.request_repaint_after(std::time::Duration::from_millis(
-                        (1000.0 / FRAME_FPS) as u64,
-                    ));
+                    if focused {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(
+                            (1000.0 / FRAME_FPS) as u64,
+                        ));
+                    }
                     Some(&self.frames[idx])
-                } else {
-                    self.bg_handle.as_ref()
                 };
 
                 if let Some(tex) = current_tex {

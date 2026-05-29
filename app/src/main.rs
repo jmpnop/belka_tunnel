@@ -141,8 +141,12 @@ fn main() -> Result<()> {
         false,
         None,
     );
-    // The status line doubles as the connect/disconnect toggle — click to flip.
-    let status_item = MenuItem::new("Connecting…  (click to disconnect)", true, None);
+    // The status line is a CheckMenuItem so its checkmark aligns with the
+    // system checkmark column — same horizontal position as the "Use neutral
+    // status icon" and "Listen on all interfaces" check rows below. When
+    // Connected, the native ✓ shows. Other states leave the slot empty and
+    // describe themselves in the text. Clicking still toggles the tunnel.
+    let status_item = CheckMenuItem::new("Connecting…", true, false, None);
     let socks_header = MenuItem::new("SOCKS5 endpoints (clients connect here):", false, None);
     let endpoints = collect_endpoints(&profile.socks.listen_addr, profile.socks.listen_port);
     let mut endpoint_items: Vec<MenuItem> = endpoints
@@ -159,7 +163,8 @@ fn main() -> Result<()> {
     let listen_all_item = CheckMenuItem::new("Listen on all interfaces", true, listen_all, None);
 
     let hide_dot_item = CheckMenuItem::new(
-        "Hide colored dot (compact mode)",
+        // Renamed from "Hide colored dot" — the indicator is now letters, not a dot.
+        "Use neutral status icon",
         true,
         file.hide_status_dot,
         None,
@@ -418,14 +423,23 @@ fn main() -> Result<()> {
         while let Ok(_e) = tray_channel.try_recv() {}
 
         if let Event::UserEvent(UserEvent::StatusChanged(status)) = event {
-            // Status line: a single glyph + host. The click-affordance lives
-            // in the tooltip so the line stays visually compact.
-            let (icon_for_status, body) = match &status {
-                Status::Connecting => (&icon_orange, format!("⟳  {}", profile.ssh.host)),
-                Status::Connected => (&icon_green, format!("✓  {}", profile.ssh.host)),
-                Status::Disconnected(_) => (&icon_red, format!("✕  {}", profile.ssh.host)),
-                Status::Disabled => (&icon_gray, format!("○  {}", profile.ssh.host)),
+            // Status text — the native check column is rendered by macOS when
+            // `set_checked(true)`. For other states the text describes itself.
+            let (icon_for_status, body, checked) = match &status {
+                Status::Connecting => (
+                    &icon_orange,
+                    format!("Connecting…  {}", profile.ssh.host),
+                    false,
+                ),
+                Status::Connected => (&icon_green, profile.ssh.host.clone(), true),
+                Status::Disconnected(_) => (
+                    &icon_red,
+                    format!("Disconnected — {}", profile.ssh.host),
+                    false,
+                ),
+                Status::Disabled => (&icon_gray, format!("Off — {}", profile.ssh.host), false),
             };
+            status_item.set_checked(checked);
             let tooltip_action = match &status {
                 Status::Disabled | Status::Disconnected(_) => "click to connect",
                 _ => "click to disconnect",
