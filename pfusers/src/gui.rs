@@ -230,9 +230,14 @@ impl App {
             s.loading_users = false;
             match users_r {
                 Ok(u) => {
-                    let n = u.len();
+                    // Toast reports the count the user will actually see
+                    // in the sidebar — uid 0 is hidden from the GUI.
+                    let visible = u.iter().filter(|u| u.uid != 0).count();
                     s.users = u;
-                    s.toast = Some((ToastKind::Success, format!("Connected. {n} users loaded.")));
+                    s.toast = Some((
+                        ToastKind::Success,
+                        format!("Connected. {visible} users loaded."),
+                    ));
                 }
                 Err(e) => {
                     s.toast = Some((
@@ -483,6 +488,22 @@ impl App {
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
+                // Hide the admin account (uid 0). pfusers is an editor for
+                // managed users; touching uid 0 from here is footgun
+                // territory (you'd be editing the account that owns your
+                // SSH session). The ENGINE still sees admin in list_users —
+                // that's load-bearing for the PHP-verify count match — but
+                // the sidebar filters it out so it's not clickable.
+                let visible: Vec<PfUser> = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .users
+                    .iter()
+                    .filter(|u| u.uid != 0)
+                    .cloned()
+                    .collect();
+
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("USERS")
@@ -490,10 +511,9 @@ impl App {
                             .size(10.5)
                             .strong(),
                     );
-                    let s = self.state.lock().unwrap();
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
-                            RichText::new(format!("{}", s.users.len()))
+                            RichText::new(format!("{}", visible.len()))
                                 .color(theme::TEXT_FAINT)
                                 .size(10.5),
                         );
@@ -501,9 +521,8 @@ impl App {
                 });
                 ui.add_space(8.0);
 
-                let users = self.state.lock().unwrap().users.clone();
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for u in &users {
+                    for u in &visible {
                         let is_selected = self.selected.as_deref() == Some(u.name.as_str());
                         let bg = if is_selected {
                             theme::ACCENT.linear_multiply(0.22)
