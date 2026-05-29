@@ -145,7 +145,11 @@ fn main() -> Result<()> {
         None,
     );
 
-    let open_firefox_item = MenuItem::new("Open Firefox via Tunnel (Private)", true, None);
+    let open_firefox_item = MenuItem::new(
+        "Browse the web through this tunnel (Firefox, private)",
+        true,
+        None,
+    );
     let edit_config_item = MenuItem::new("Edit Configuration…", true, None);
     let reveal_data_item = MenuItem::new("Reveal Data Folder in Finder", true, None);
     let open_logs_item = MenuItem::new("Open Log File", true, None);
@@ -249,16 +253,20 @@ fn main() -> Result<()> {
                     let _ = t.set_icon(Some(icon));
                 }
             } else if event.id == open_firefox_id {
-                match firefox::FirefoxProfile::ensure(
+                let result = firefox::FirefoxProfile::ensure(
                     &socks_host_for_firefox,
                     socks_port_for_firefox,
-                ) {
-                    Ok(p) => {
-                        if let Err(e) = p.launch() {
-                            error!(error = %e, "Firefox launch failed");
-                        }
-                    }
-                    Err(e) => error!(error = %e, "Firefox profile setup failed"),
+                )
+                .and_then(|p| p.launch());
+                if let Err(e) = result {
+                    error!(error = %e, "Firefox launch failed");
+                    macos_alert(
+                        "Couldn't launch Firefox",
+                        &format!(
+                            "{e}\n\nInstall Firefox from https://www.mozilla.org/firefox/ \
+                             or check that ~/.ssh/id_ed25519 is readable."
+                        ),
+                    );
                 }
             } else if event.id == edit_config_id {
                 spawn_gui();
@@ -308,7 +316,7 @@ fn main() -> Result<()> {
                     &icon_red,
                     format!("Disconnected: {err}  (click to reconnect)"),
                 ),
-                Status::Disabled => (&icon_gray, "Paused  (click to connect)".to_string()),
+                Status::Disabled => (&icon_gray, "Disconnected  (click to connect)".to_string()),
             };
             let icon = if hide_status_dot {
                 icon_hidden.clone()
@@ -454,6 +462,20 @@ fn update_listen_addr(config_path: &std::path::Path, new_addr: &str) -> Result<(
     }
     file.save(config_path)?;
     Ok(())
+}
+
+fn macos_alert(title: &str, body: &str) {
+    // Escape any double quotes in the strings for AppleScript safety.
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"display alert "{}" message "{}" as critical buttons {{"OK"}} default button "OK""#,
+        esc(title),
+        esc(body)
+    );
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(&script)
+        .spawn();
 }
 
 fn decode_icon(bytes: &[u8]) -> Result<Icon> {
