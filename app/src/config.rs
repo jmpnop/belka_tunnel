@@ -40,10 +40,6 @@ pub struct ConfigFile {
     /// Name of the profile that the tunnel daemon should run as.
     pub active: String,
     pub profiles: BTreeMap<String, Profile>,
-    /// When true, the menu bar shows just a dot "·" instead of the colored
-    /// status emoji. The menu is still accessible by clicking on it.
-    #[serde(default)]
-    pub hide_status_dot: bool,
 }
 
 // ---- Defaults ----
@@ -83,7 +79,6 @@ impl Default for ConfigFile {
         Self {
             active: "default".to_string(),
             profiles,
-            hide_status_dot: false,
         }
     }
 }
@@ -150,7 +145,6 @@ mod tests {
         let cfg = ConfigFile::default();
         assert_eq!(cfg.active, "default");
         assert!(cfg.profiles.contains_key("default"));
-        assert!(!cfg.hide_status_dot);
     }
 
     #[test]
@@ -161,7 +155,6 @@ mod tests {
         let back = ConfigFile::load(&path).unwrap();
         assert_eq!(back.active, "default");
         assert_eq!(back.profiles.len(), 1);
-        assert!(!back.hide_status_dot);
     }
 
     #[test]
@@ -173,13 +166,15 @@ mod tests {
         assert!(err.contains("ghost"), "got: {err}");
     }
 
+    /// Old configs may still carry the old `hide_status_dot` field — serde's
+    /// default is to ignore unknown fields, so we should round-trip cleanly.
     #[test]
-    fn hide_status_dot_defaults_false_when_missing() {
-        // Older configs predate the field; #[serde(default)] must fill in `false`.
+    fn unknown_fields_ignored() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("c.json");
         let body = r#"{
             "active": "default",
+            "hide_status_dot": true,
             "profiles": {
                 "default": {
                     "ssh": {
@@ -196,6 +191,6 @@ mod tests {
         }"#;
         std::fs::write(&path, body).unwrap();
         let cfg = ConfigFile::load(&path).unwrap();
-        assert!(!cfg.hide_status_dot);
+        assert_eq!(cfg.active, "default");
     }
 }

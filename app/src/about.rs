@@ -122,16 +122,29 @@ const ACCENT: Color32 = Color32::from_rgb(99, 124, 247);
 const PAD: f32 = 28.0;
 const IMAGE_FRACTION: f32 = 0.46;
 
+/// Number of recently-used JPEG frames we keep decoded into GPU textures.
+/// At 12fps that's roughly one second of look-back; new frames decode in
+/// <1ms each on modern hardware so the eviction churn is invisible. Drops
+/// the eager 33 MB GPU allocation that the old `Vec<TextureHandle>` did
+/// at startup — when the About window is never opened we pay nothing.
+const FRAME_CACHE_CAP: usize = 12;
+
 struct AboutApp {
-    frames: Vec<egui::TextureHandle>,
+    /// Raw JPEG bytes per frame, indexed; never mutated.
+    frame_bytes: Vec<&'static [u8]>,
+    /// Decoded textures (subset, LRU-evicted to keep memory bounded).
+    frame_cache: std::collections::HashMap<usize, egui::TextureHandle>,
+    /// Indices in MRU order — oldest at the front, freshest at the back.
+    frame_lru: std::collections::VecDeque<usize>,
     started: std::time::Instant,
     first_frame: bool,
     expanded_credits: bool,
 }
 
 impl AboutApp {
-    fn new(ctx: &egui::Context) -> Self {
-        // Pre-decode all video frames into GPU textures (~63 × 360×360 RGBA).
+    fn new(_ctx: &egui::Context) -> Self {
+        // Enumerate the JPEG sources but DON'T decode them — that happens on
+        // demand in `frame_texture()`.
         let mut frame_files: Vec<&include_dir::File> = BT_FRAMES_DIR
             .files()
             .filter(|f| {
@@ -143,31 +156,52 @@ impl AboutApp {
             })
             .collect();
         frame_files.sort_by_key(|f| f.path().to_string_lossy().to_string());
-        let frames: Vec<egui::TextureHandle> = frame_files
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, f)| {
-                let img = image::load_from_memory(f.contents()).ok()?.to_rgba8();
-                let (w, h) = img.dimensions();
-                let color = egui::ColorImage::from_rgba_unmultiplied(
-                    [w as usize, h as usize],
-                    img.as_raw(),
-                );
-                Some(ctx.load_texture(
-                    format!("bt-frame-{i:03}"),
-                    color,
-                    egui::TextureOptions::LINEAR,
-                ))
-            })
-            .collect();
-        tracing::info!(frames = frames.len(), "loaded animation frames");
+        let frame_bytes: Vec<&'static [u8]> =
+            frame_files.into_iter().map(|f| f.contents()).collect();
+        tracing::info!(
+            count = frame_bytes.len(),
+            cache_cap = FRAME_CACHE_CAP,
+            "indexed animation frames (lazy decode)"
+        );
 
         Self {
-            frames,
+            frame_bytes,
+            frame_cache: std::collections::HashMap::new(),
+            frame_lru: std::collections::VecDeque::new(),
             started: std::time::Instant::now(),
             first_frame: true,
             expanded_credits: false,
         }
+    }
+
+    /// Return the GPU texture for `idx`, decoding + uploading if it isn't in
+    /// the cache. Promotes `idx` to most-recently-used and evicts the oldest
+    /// entry if we're at capacity.
+    fn frame_texture(&mut self, ctx: &egui::Context, idx: usize) -> Option<egui::TextureHandle> {
+        if self.frame_cache.contains_key(&idx) {
+            // Refresh LRU order.
+            self.frame_lru.retain(|&i| i != idx);
+            self.frame_lru.push_back(idx);
+            return self.frame_cache.get(&idx).cloned();
+        }
+        let bytes = *self.frame_bytes.get(idx)?;
+        let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let (w, h) = img.dimensions();
+        let color =
+            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
+        let handle = ctx.load_texture(
+            format!("bt-frame-{idx:03}"),
+            color,
+            egui::TextureOptions::LINEAR,
+        );
+        self.frame_cache.insert(idx, handle.clone());
+        self.frame_lru.push_back(idx);
+        while self.frame_cache.len() > FRAME_CACHE_CAP {
+            if let Some(oldest) = self.frame_lru.pop_front() {
+                self.frame_cache.remove(&oldest);
+            }
+        }
+        Some(handle)
     }
 }
 
@@ -206,17 +240,17 @@ impl eframe::App for AboutApp {
                 // a dropped-from-view About window otherwise burns 12fps of GPU
                 // for nothing.
                 let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-                let current_tex = if self.frames.is_empty() {
+                let current_tex = if self.frame_bytes.is_empty() {
                     None
                 } else {
                     let elapsed = self.started.elapsed().as_secs_f32();
-                    let idx = (elapsed * FRAME_FPS) as usize % self.frames.len();
+                    let idx = (elapsed * FRAME_FPS) as usize % self.frame_bytes.len();
                     if focused {
                         ctx.request_repaint_after(std::time::Duration::from_millis(
                             (1000.0 / FRAME_FPS) as u64,
                         ));
                     }
-                    Some(&self.frames[idx])
+                    self.frame_texture(ctx, idx)
                 };
 
                 if let Some(tex) = current_tex {

@@ -40,7 +40,6 @@ const BT_GREEN_PNG: &[u8] = include_bytes!("../assets/bt-green.png");
 const BT_ORANGE_PNG: &[u8] = include_bytes!("../assets/bt-orange.png");
 const BT_RED_PNG: &[u8] = include_bytes!("../assets/bt-red.png");
 const BT_GRAY_PNG: &[u8] = include_bytes!("../assets/bt-gray.png");
-const BT_HIDDEN_PNG: &[u8] = include_bytes!("../assets/bt-hidden.png");
 
 use crate::config::{ConfigFile, Profile};
 use crate::tunnel::Status;
@@ -188,14 +187,6 @@ fn main() -> Result<()> {
     let listen_all = profile.socks.listen_addr == "0.0.0.0";
     let listen_all_item = CheckMenuItem::new("Listen on all interfaces", true, listen_all, None);
 
-    let hide_dot_item = CheckMenuItem::new(
-        // Renamed from "Hide colored dot" — the indicator is now letters, not a dot.
-        "Use neutral status icon",
-        true,
-        file.hide_status_dot,
-        None,
-    );
-
     // ---------- Firefox submenu (dynamic on Firefox state) ----------
     let firefox_info = firefox::detect();
     let firefox_submenu = Submenu::new("Browse via tunnel (Firefox)", true);
@@ -254,7 +245,6 @@ fn main() -> Result<()> {
     }
     menu.append(&copy_endpoints_item)?;
     menu.append(&listen_all_item)?;
-    menu.append(&hide_dot_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&firefox_submenu)?;
     menu.append(&PredefinedMenuItem::separator())?;
@@ -271,19 +261,12 @@ fn main() -> Result<()> {
     let icon_orange = decode_icon(BT_ORANGE_PNG)?;
     let icon_red = decode_icon(BT_RED_PNG)?;
     let icon_gray = decode_icon(BT_GRAY_PNG)?;
-    let icon_hidden = decode_icon(BT_HIDDEN_PNG)?;
-
-    let initial_icon = if file.hide_status_dot {
-        icon_hidden.clone()
-    } else {
-        icon_orange.clone()
-    };
 
     // Menu bar: colored cyrillic "БТ" icon for status. Orange on startup.
     let mut tray = Some(
         TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_icon(initial_icon)
+            .with_icon(icon_orange.clone())
             .with_icon_as_template(false)
             .with_tooltip("БелкаТуннель")
             .build()?,
@@ -300,12 +283,10 @@ fn main() -> Result<()> {
     let restart_id = restart_item.id().clone();
     let copy_endpoints_id = copy_endpoints_item.id().clone();
     let listen_all_id = listen_all_item.id().clone();
-    let hide_dot_id = hide_dot_item.id().clone();
     let status_toggle_id = status_item.id().clone();
     let install_firefox_id = install_firefox_item.id().clone();
     let install_homebrew_id = install_homebrew_item.id().clone();
     let uninstall_firefox_id = uninstall_firefox_item.id().clone();
-    let mut hide_status_dot = file.hide_status_dot;
     let socks_host_for_firefox = if profile.socks.listen_addr == "0.0.0.0" {
         "127.0.0.1".to_string()
     } else {
@@ -330,19 +311,6 @@ fn main() -> Result<()> {
                 let new_enabled = !tunnel_ctl.is_enabled();
                 tunnel_ctl.set_enabled(new_enabled);
                 info!(enabled = new_enabled, "tunnel toggle (via status click)");
-            } else if event.id == hide_dot_id {
-                hide_status_dot = hide_dot_item.is_checked();
-                if let Err(e) = update_hide_dot(&config_path, hide_status_dot) {
-                    error!(error = %e, "could not persist hide-dot setting");
-                }
-                if let Some(t) = tray.as_ref() {
-                    let icon = if hide_status_dot {
-                        icon_hidden.clone()
-                    } else {
-                        icon_orange.clone()
-                    };
-                    let _ = t.set_icon(Some(icon));
-                }
             } else if event.id == open_firefox_id {
                 if let Err(e) = firefox::launch_default() {
                     error!(error = %e, "Firefox launch failed");
@@ -483,13 +451,8 @@ fn main() -> Result<()> {
                 ),
                 _ => format!("БелкаТуннель — {} ({tooltip_action})", profile.ssh.host),
             };
-            let icon = if hide_status_dot {
-                icon_hidden.clone()
-            } else {
-                icon_for_status.clone()
-            };
             if let Some(t) = tray.as_ref() {
-                let _ = t.set_icon(Some(icon));
+                let _ = t.set_icon(Some(icon_for_status.clone()));
                 let _ = t.set_tooltip(Some(tooltip));
             }
             status_item.set_text(&body);
@@ -749,14 +712,6 @@ fn spawn_about() {
         Err(_) => return,
     };
     let _ = std::process::Command::new(exe).arg("--about").spawn();
-}
-
-fn update_hide_dot(config_path: &std::path::Path, hide: bool) -> Result<()> {
-    let mut file =
-        ConfigFile::load(config_path).or_else(|_| Ok::<_, anyhow::Error>(ConfigFile::default()))?;
-    file.hide_status_dot = hide;
-    file.save(config_path)?;
-    Ok(())
 }
 
 fn relaunch_self() {
