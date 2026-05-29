@@ -1,6 +1,12 @@
-# БелкаТуннель
+# БелкаТуннель + pfUsers
 
-Setting up an SSH-based SOCKS5 proxy that routes Olga's traffic through Pasha's pfSense WAN IP. The native macOS app under `app/` is `БелкаТуннель`; the working directory is still `~/PycharmProjects/ssh-proxy-wan/` (unrenamed to keep paths stable).
+This repo is a Cargo workspace with two macOS apps that work together:
+
+- **БелкаТуннель** (`app/`) — menu-bar SSH SOCKS5 tunnel daemon, runs on Olga's Mac
+- **pfUsers** (`pfusers/`) — windowed admin app, runs on Pasha's Mac, manages the tunnel users on pfSense
+- `crates/belka-ui/` — Zed-inspired dark theme + form widgets, shared by both apps
+
+The original goal was the tunnel itself; pfUsers came out of needing to keep the router-side user accounts honest as the deployment evolved. The working directory is still `~/PycharmProjects/ssh-proxy-wan/` (unrenamed to keep paths stable).
 
 Architecture:
 
@@ -50,10 +56,11 @@ Source = any (per user choice; consider tightening to Olga's public IP later).
 
 - Authorized key (already present in pfSense User Manager):
   `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMOH1Tl4At42ihChSJZBEGfBq1a9ngoB/c4UFzMCePMJ pfsense-tunnel`
-- Privilege added: `user-shell-access` (System: Shell account access).
+- Privilege: **`user-ssh-tunnel`** (swapped from `user-shell-access` via pfUsers on 2026-05-29 — see [pfUsers section](#native-macos-app--pfusers-pfusers)). pfSense's `derive_shell` ladder maps this to `/usr/local/sbin/ssh_tunnel_shell`, so port forwarding (`-D`, `-L`, `-R`) works but interactive `exec` is blocked.
 - System account provisioned via `local_user_set()`:
-  - `/etc/passwd` entry, shell `/bin/tcsh`
+  - `/etc/passwd` entry, shell `/usr/local/sbin/ssh_tunnel_shell`
   - Home `/home/olgatimoshevskaia` with `.ssh/authorized_keys`
+- No Web UI / OS password: pfUsers writes a random throwaway bcrypt-hash on creation and immediately drops the plaintext. pfSense's web UI login is mathematically impossible for tunnel users.
 
 ### 3. Cloudflare DDNS
 
@@ -230,6 +237,108 @@ Match the working CLI command: `olgatimoshevskaia@aurora.celestialtech.io:22222`
 - **Host key verification: trust-on-first-use** (commit `20b53ae`). First connect on a profile records the server's `SHA256:…` fingerprint into `host_key_fingerprint` in `config.json`; every subsequent connect requires an exact match. Mismatch → `Status::Disconnected("host key mismatch — …")` plus a one-shot macOS notification. The GUI editor's SSH section shows the recorded fingerprint as read-only with a "Forget" button (use after a legitimate server-key rotation; the daemon TOFUs the new key on the next connect).
 - **No autolaunch on login.** Add via launchd plist or macOS *Login Items* (Settings → General → Login Items → +).
 
+## Native macOS app — pfUsers (`pfusers/`)
+
+A separate windowed admin app for CRUDing pfSense tunnel users on the router. Built on the same Zed-inspired dark theme as БелкаТуннель (shared via the `belka-ui` workspace crate). Lives at `pfusers/` in this repo (the repo is now a Cargo workspace; see *Repo layout* below).
+
+### What it is
+
+- Source: `pfusers/` (Cargo workspace member, edition 2021)
+- Built artefact: `pfusers/dist/pfUsers.app` (windowed app, **`LSUIElement` absent** — pfUsers IS a Dock app, unlike BelkaTunnel which is menu-bar only)
+- Identifier: `io.celestialtech.pfUsers`
+- Config: `~/Library/Application Support/io.celestialtech.pfUsers/config.json` (SSH endpoint, recorded host-key fingerprint, window size). Atomic temp-rename save.
+- Logs: `~/Library/Application Support/io.celestialtech.pfUsers/logs/pfusers.<date>.log` (daily rotated, 7-day retention)
+- Defaults: `admin@192.168.1.1:22222`, key `~/.ssh/id_ed25519`. Settings modal exposes a Browse button to pick a different key + a Forget button to re-TOFU after a server key rotation.
+
+### Repo layout (workspace)
+
+```
+ssh-proxy-wan/
+├── Cargo.toml                  # workspace root: members = [app, crates/belka-ui, pfusers]
+├── app/                        # БелкаТуннель (menu-bar tunnel daemon)
+├── crates/belka-ui/            # shared theme + form helpers (extracted from app/src/gui.rs)
+├── pfusers/                    # pfUsers (windowed admin app, this section)
+└── tools/                      # Python bt CLI — knows about both apps
+```
+
+`bt precommit`, `bt prepush`, `bt bundle` still target БелкаТуннель. `bt bundle-pfusers`, `bt verify pfusers` target pfUsers.
+
+### Architecture
+
+- **No PHP on the wire.** Reads `/cf/conf/config.xml` over SSH (`cat`), parses with `quick-xml`, mutates only the `<system>/<user>` and `<system>/<group>` subtrees, writes back atomically via `cat > tmp && mv`. Side effects (`pw useradd / usermod / userdel`, `mkdir`/`chmod`/`chown` of `/home/<user>/.ssh/authorized_keys`) go through SSH `exec`.
+- Same TOFU host-key verification as БелкаТуннель: first connect records the `SHA256:…` fingerprint; mismatch refuses with rollback message; "Forget" button in Settings clears it for a controlled re-TOFU.
+- Password hashing for the (mandatory) `<bcrypt-hash>` field: `bcrypt` crate with cost=10, matches pfSense's default. Tunnel users never log into the web UI so we generate the value from `/dev/urandom`, hash it, and discard the plaintext — see *No password story* below.
+
+### Byte-precise mutation + four-layer safety wrapper
+
+The single most important property: **bytes outside the changed `<user>` block survive verbatim**. We never re-serialise the full document. `apply_mutation` parses the XML to find byte offsets, splices new bytes only for the changed region, and writes:
+
+```
+result = original[..start] + new_bytes + original[end..]
+```
+
+Regions outside the splice are literally the same `&[u8]` as input — there's no Writer re-emission to disagree with pfSense's parser.
+
+Every write is wrapped by `write_with_safety`:
+
+1. `cp /cf/conf/config.xml /cf/conf/backup/config-<unix-ts>-pfusers.xml` — pfSense's Web UI Config History page enumerates that directory, so our snapshots show up alongside its own and the admin can revert through normal flows.
+2. Atomic write of the mutated XML to `config.xml`.
+3. Re-read, parse with our Rust parser, run the per-op assertion closure (new user found, descr round-tripped, count incremented, ...).
+4. Invoke pfSense's own PHP parser once: `php -r 'require_once("config.inc"); parse_config(true); echo count($config["system"]["user"]);'` and compare to the expected post-mutation count. **This is the only PHP call in pfusers** and exists purely as a parser-agreement check.
+5. On any failure in 2/3/4: `cp` the snapshot back. Router sees the exact bytes it had before the call.
+
+Verified end-to-end against the live router (commit `46f8227`): olga's `user-shell-access` → `user-ssh-tunnel` swap landed cleanly through the full pipeline. The PHP-verify command must NOT pass `-d include_path=…` — pfSense's default `include_path` includes `/usr/local/share/pear` where `Net/IPv6.php` lives, and our earlier override stripped that, breaking `require_once`.
+
+### What the GUI exposes (scope discipline)
+
+The detail form for a user has, from top to bottom: **Identity** (username read-only, full name editable), **Privileges** (toggles from a curated 14-item subset of pfSense's ~251 priv strings), **Authorized SSH keys** (multiline textarea, one OpenSSH-format key per line), **Danger zone** (delete, with type-username confirm modal). Save Changes is greyed unless something differs from the server state (priv_list compared as a `HashSet`, so toggle order doesn't matter).
+
+The Add User dialog asks for: username, full name (optional), initial SSH key (optional). That's it.
+
+**Removed by design** (each closing a UX hole):
+- Group memberships card — only `all` (implicit) and `admins` (root, page-all) exist on this router; non-admin users belong in neither beyond `all`. Engine still supports group edits via `Mutation::{AddGroupMember, RemoveGroupMembership}` if a future deployment introduces real custom groups.
+- Password / Reset password card — pfSense uses `<bcrypt-hash>` only for Web UI login; Pasha's sshd is `PasswordAuthentication=no`, and tunnel users don't touch the web UI. `pfsense::set_password` remains in the engine.
+- Add User priv toggles (`Shell access`, `Web UI (page-all)`) — every user pfUsers creates is by definition a tunnel user. `spawn_add_user` pins `priv_list` to `["user-ssh-tunnel"]`.
+- Add User password field — tunnel users have no password story (next bullet).
+- Admin row (uid 0) in the sidebar — touching uid 0 from here is footgun territory. Filter is GUI-side, not engine-side, so the PHP-verify count match still works.
+
+### No password story
+
+pfSense's `local_user_set_password` bails on an empty argument, so we can't simply skip the hash. `spawn_add_user` instead generates a 32-byte hex secret from `/dev/urandom`, passes it to `pfsense::add_user` (which bcrypts at cost=10), and `drop()`s the plaintext immediately. Nobody — including pfusers itself, including future maintainers — ever knows the value. The `<bcrypt-hash>` field in `config.xml` is effectively a random oracle: no input could plausibly hash to it, so any Web UI login attempt is mathematically guaranteed to fail.
+
+`random_secret_hex` panics on `/dev/urandom` failure rather than falling back to a deterministic value — silently writing a predictable hash would be worse than crashing the spawn.
+
+### Build / test / harness
+
+```bash
+./bt bundle-pfusers           # cargo build --release -p pfusers + assemble dist/pfUsers.app
+./bt verify pfusers           # Info.plist keys, codesign, assert LSUIElement absent
+cargo test --workspace        # 53 BelkaTunnel + 20 pfusers = 73 unit tests
+cargo test --release -p pfusers swap_olga_priv_live -- --ignored --nocapture
+                              # live-router integration test against admin@192.168.1.1
+```
+
+The live test (`#[ignore]` by default) connects to the real router, asserts olga's current priv, swaps it to `user-ssh-tunnel`, asserts the post-write state. Useful as the canonical "does the four-layer wrapper still work end-to-end?" check after non-trivial pfsense.rs edits.
+
+### Run
+
+```
+open pfusers/dist/pfUsers.app
+```
+
+Or for live logs to stderr:
+
+```
+RUST_LOG=info pfusers/dist/pfUsers.app/Contents/MacOS/pfusers
+```
+
+### Known limitations / open items
+
+- **No DMG packaging yet.** `bt dmg-pfusers` not implemented; only the .app exists in `pfusers/dist/`.
+- **No notarization wiring** — `SIGN_IDENTITY` env var is honoured by `pfusers/build-app.sh` but there's no `bt notarize-pfusers` command.
+- **No Add-or-Edit groups UI.** If a real `vpn-users` group ever materialises on the router, the GUI needs the membership card back (engine support remains).
+- **Single-router scope.** pfusers connects to one endpoint at a time. Multi-router support would mean a profile concept in `config.json`, similar to БелкаТуннель.
+
 ## Olga's `~/.ssh/config` (recommended)
 
 Saves typing and standardizes flags. Then she can just run `ssh wan-proxy`.
@@ -290,9 +399,13 @@ Load: `launchctl load ~/Library/LaunchAgents/com.olga.ssh-proxy.plist`
 Unload: `launchctl unload ~/Library/LaunchAgents/com.olga.ssh-proxy.plist`
 Logs: `tail -f /tmp/ssh-proxy.err`
 
-## Hardening — tunnel-only Match block
+## Hardening — tunnel-only access
 
-To prevent Olga (or anyone with her key) from getting an interactive shell while keeping the SOCKS proxy working, append to pfSense's `/etc/ssh/sshd_config` (note: pfSense regenerates this file from `config.xml` on reload — see [pfSense ssh customization](#) caveat; you may need to use the *System → Advanced → Admin Access → Secure Shell* custom options field, or persist via a tunable):
+**The original sshd `Match` block approach is superseded.** As of 2026-05-29 olga has the pfSense priv `user-ssh-tunnel` (set via pfUsers; see the pfUsers section below). That priv causes pfSense's `local_user_set` to assign `/usr/local/sbin/ssh_tunnel_shell` as her login shell, which permits TCP forwarding (so `-D 1080` SOCKS5 works) but refuses any `exec` request. No `/etc/ssh/sshd_config` edits required — and crucially no need to keep the sshd_config patch in sync across pfSense regenerations.
+
+If you ever need to apply the same hardening to a new user, the canonical move is to set their priv to `user-ssh-tunnel` via pfUsers (or the pfSense Web UI under System → User Manager). The sshd_config Match block below is kept for historical reference only:
+
+<details><summary>(historical) Match block approach</summary>
 
 ```
 Match User olgatimoshevskaia
@@ -304,7 +417,9 @@ Match User olgatimoshevskaia
     ForceCommand /sbin/nologin
 ```
 
-Trade-off: with `PermitTTY no` + `ForceCommand /sbin/nologin` she can't shell in but `-D 1080` still works (port forwarding doesn't need a TTY).
+Issue: pfSense regenerates `/etc/ssh/sshd_config` from `config.xml` on reload, so any direct edit gets lost. The priv-based approach embeds the same intent into config.xml itself.
+
+</details>
 
 ## Health check (Olga's Mac)
 
@@ -364,9 +479,11 @@ fi
 ## Open follow-ups
 
 - Tighten WAN rule to Olga's specific source IP (currently `any`).
-- Apply the tunnel-only Match block above; verify it survives a pfSense config reload.
+- ~~Apply the tunnel-only Match block above; verify it survives a pfSense config reload.~~ Superseded by olga's `user-ssh-tunnel` priv via pfUsers (commit `46f8227`).
 - Resolve the local `::1:1080` conflict on Olga's Mac.
 - Decide whether to enable `LogLevel VERBOSE` in sshd_config for better audit trail.
 - Consider a second user / key for redundancy in case Olga's key is rotated.
 - Rotate the Cloudflare API token now that the setup is verified (see *Secrets* above).
 - Remove the disabled NoIP entry from pfSense config once Cloudflare DDNS has run successfully through a real WAN-IP change.
+- **pfUsers**: build a release DMG (`bt dmg-pfusers` not yet implemented).
+- **pfUsers**: wire `bt notarize-pfusers` for distribution. `SIGN_IDENTITY` env var is honoured by `pfusers/build-app.sh` but no notarize step exists.
