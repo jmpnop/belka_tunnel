@@ -789,10 +789,23 @@ fn relaunch_self() {
         None
     });
     let target = bundle.unwrap_or_else(|| exe.clone().unwrap_or_default());
-    let _ = std::process::Command::new("/usr/bin/open")
+    match std::process::Command::new("/usr/bin/open")
         .arg("-n")
         .arg(target.as_os_str())
-        .spawn();
+        .spawn()
+    {
+        Ok(_) => info!(target = %target.display(), "relaunching"),
+        // Both anti-patterns the user would otherwise hit silently: a
+        // ControlFlow::Exit follows this call, so without a log the daemon
+        // would just disappear with no replacement and no breadcrumb. The
+        // most common cause is a stale bundle path after the user moved
+        // the .app between drives without re-launching.
+        Err(e) => error!(
+            target = %target.display(),
+            error = %e,
+            "could not relaunch — process will exit without a replacement",
+        ),
+    }
 }
 
 // Quiet unused warnings on this struct field — we keep Profile available for
