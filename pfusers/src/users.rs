@@ -44,14 +44,61 @@ fn default_scope() -> String {
     "user".to_string()
 }
 
+/// Compact summary of what a user can do over SSH, used by the sidebar
+/// dot + pill so the visual state matches reality (e.g., a tunnel-only
+/// user is still "active SSH" even though they have no interactive shell).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshAccess {
+    /// `user-shell-access` or `page-all` — pfSense assigns `/bin/tcsh`.
+    Shell,
+    /// `user-ssh-tunnel` — `/usr/local/sbin/ssh_tunnel_shell`, port-forward
+    /// only, no exec. Still SSH; the SOCKS5 / BelkaTunnel use case.
+    Tunnel,
+    /// `user-copy-files` or `user-copy-files-chroot` — SCP/SFTP only,
+    /// `/usr/local/{bin/scponly,sbin/scponlyc}`.
+    Scp,
+    /// None of the SSH-granting privileges — pfSense assigns
+    /// `/sbin/nologin` and `pw lock`s the account.
+    None,
+}
+
 impl PfUser {
+    /// Classify the user's SSH access into the single mode pfSense's
+    /// `local_user_set` priv-ladder would pick — Shell ⊃ Tunnel ⊃ Scp ⊃ None.
+    /// Order mirrors auth.inc:706 so the answer matches what `pw`
+    /// actually configured on the OS side.
+    pub fn ssh_access(&self) -> SshAccess {
+        let p = &self.priv_list;
+        if p.iter()
+            .any(|x| x == "user-shell-access" || x == "page-all")
+        {
+            SshAccess::Shell
+        } else if p
+            .iter()
+            .any(|x| x == "user-copy-files-chroot" || x == "user-copy-files")
+        {
+            SshAccess::Scp
+        } else if p.iter().any(|x| x == "user-ssh-tunnel") {
+            SshAccess::Tunnel
+        } else {
+            SshAccess::None
+        }
+    }
+
+    /// True if the user has ANY SSH-granting privilege — green-dot semantic
+    /// for the sidebar. Distinct from `ssh_access() == Shell` because a
+    /// tunnel-only user is still actively using SSH (the SOCKS5 case).
+    pub fn has_ssh_access(&self) -> bool {
+        !matches!(self.ssh_access(), SshAccess::None)
+    }
+
     /// True if `user-shell-access` or `page-all` is granted — pfSense's
     /// `local_user_set` uses the same rule to assign `/bin/tcsh` instead of
-    /// `/sbin/nologin`.
+    /// `/sbin/nologin`. Currently only the test suite needs this directly
+    /// (the GUI matches on `ssh_access()` to also surface Tunnel/Scp).
+    #[allow(dead_code)]
     pub fn has_shell_access(&self) -> bool {
-        self.priv_list
-            .iter()
-            .any(|p| p == "user-shell-access" || p == "page-all")
+        matches!(self.ssh_access(), SshAccess::Shell)
     }
 
     /// True if the recorded password hash uses bcrypt or sha512. The
@@ -106,6 +153,45 @@ pub const CANONICAL_PRIVILEGES: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_access_classification_matches_priv_ladder() {
+        let mut u = PfUser {
+            name: "x".into(),
+            descr: "".into(),
+            uid: 1,
+            scope: "user".into(),
+            expires: None,
+            disabled: false,
+            groups: vec![],
+            priv_list: vec![],
+            authorized_keys: "".into(),
+            has_bcrypt: false,
+            has_sha512: false,
+            has_legacy_md5: false,
+        };
+        assert_eq!(u.ssh_access(), SshAccess::None);
+        assert!(!u.has_ssh_access());
+
+        u.priv_list = vec!["user-ssh-tunnel".into()];
+        assert_eq!(u.ssh_access(), SshAccess::Tunnel);
+        assert!(u.has_ssh_access(), "tunnel should count as ssh access");
+        assert!(!u.has_shell_access(), "tunnel is NOT interactive shell");
+
+        u.priv_list = vec!["user-copy-files".into()];
+        assert_eq!(u.ssh_access(), SshAccess::Scp);
+        assert!(u.has_ssh_access());
+        assert!(!u.has_shell_access());
+
+        // page-all implies shell per pfSense's priv ladder, regardless of
+        // what other priv strings are present.
+        u.priv_list = vec!["page-all".into(), "user-ssh-tunnel".into()];
+        assert_eq!(u.ssh_access(), SshAccess::Shell);
+
+        // user-shell-access wins over a co-present tunnel grant.
+        u.priv_list = vec!["user-shell-access".into(), "user-ssh-tunnel".into()];
+        assert_eq!(u.ssh_access(), SshAccess::Shell);
+    }
 
     #[test]
     fn shell_access_detection() {

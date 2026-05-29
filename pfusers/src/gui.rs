@@ -242,10 +242,7 @@ impl App {
                 Ok(u) => {
                     let n = u.len();
                     s.users = u;
-                    s.toast = Some((
-                        ToastKind::Success,
-                        format!("Connected. {n} users loaded."),
-                    ));
+                    s.toast = Some((ToastKind::Success, format!("Connected. {n} users loaded.")));
                 }
                 Err(e) => {
                     s.toast = Some((
@@ -586,7 +583,13 @@ impl App {
                             .inner_margin(Margin::symmetric(12.0, 10.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    let dot = if u.has_shell_access() {
+                                    // Green dot = "can authenticate via SSH in any
+                                    // form". Tunnel-only users (the SOCKS5 case
+                                    // like olga) are also green because they ARE
+                                    // actively using SSH, just without an
+                                    // interactive shell. The pill below
+                                    // disambiguates which form.
+                                    let dot = if u.has_ssh_access() {
                                         theme::SUCCESS
                                     } else {
                                         theme::TEXT_FAINT
@@ -599,8 +602,17 @@ impl App {
                                             .strong(),
                                     );
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if u.has_shell_access() {
-                                            pill(ui, "SHELL", theme::ACCENT);
+                                        match u.ssh_access() {
+                                            crate::users::SshAccess::Shell => {
+                                                pill(ui, "SHELL", theme::ACCENT);
+                                            }
+                                            crate::users::SshAccess::Tunnel => {
+                                                pill(ui, "TUNNEL", theme::SUCCESS);
+                                            }
+                                            crate::users::SshAccess::Scp => {
+                                                pill(ui, "SCP", theme::TEXT_MUTED);
+                                            }
+                                            crate::users::SshAccess::None => {}
                                         }
                                     });
                                 });
@@ -736,17 +748,23 @@ impl App {
                             ui,
                             "Group memberships",
                             Some(
-                                "One group name per line. Saving an EMPTY field strips the user \
-                                 from every group except 'all'. Leaving the field UNTOUCHED preserves \
-                                 current memberships.",
+                                "One group name per line (e.g. 'admins'). Saving an EMPTY \
+                                 field strips the user from every group except 'all'. Leaving \
+                                 the field UNTOUCHED preserves current memberships.",
                             ),
                         );
+                        // Hint text must NOT look like a plausible real value —
+                        // earlier we used 'admins\nvpn-users' as a hint, and
+                        // because pfSense actually has an 'admins' group it
+                        // looked like the field was populated when it wasn't.
+                        // Using a parenthesised instruction makes the empty
+                        // state unambiguous.
                         let resp = ui.add(
                             egui::TextEdit::multiline(&mut buf.groups_text)
                                 .font(egui::TextStyle::Monospace)
                                 .desired_rows(4)
                                 .desired_width(f32::INFINITY)
-                                .hint_text("admins\nvpn-users\n"),
+                                .hint_text("(no groups — type names here)"),
                         );
                         if resp.changed() {
                             buf.groups_dirty = true;

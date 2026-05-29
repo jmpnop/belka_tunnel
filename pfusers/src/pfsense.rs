@@ -1456,7 +1456,9 @@ mod tests {
             olga_after.groups, olga_before.groups,
             "group memberships changed even though groups=None was passed"
         );
-        println!("OK — olga now uses user-ssh-tunnel (shell will be /usr/local/sbin/ssh_tunnel_shell)");
+        println!(
+            "OK — olga now uses user-ssh-tunnel (shell will be /usr/local/sbin/ssh_tunnel_shell)"
+        );
     }
 
     const SAMPLE_XML: &str = r#"<?xml version="1.0"?>
