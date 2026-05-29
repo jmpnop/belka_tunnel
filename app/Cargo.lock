@@ -3597,6 +3597,7 @@ dependencies = [
  "rfd",
  "russh",
  "russh-keys",
+ "semver",
  "serde",
  "serde_json",
  "tao",

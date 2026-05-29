@@ -6,6 +6,7 @@ mod firefox;
 mod gui;
 mod socks;
 mod tunnel;
+mod updater;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -47,6 +48,7 @@ use crate::tunnel::Status;
 #[derive(Debug, Clone)]
 enum UserEvent {
     StatusChanged(Status),
+    UpdateAvailable(updater::UpdateInfo),
 }
 
 fn main() -> Result<()> {
@@ -111,6 +113,23 @@ fn main() -> Result<()> {
             }
         }
     });
+
+    // Update check — single-shot on startup, runs on a dedicated blocking
+    // thread so the curl subprocess doesn't tie up a tokio worker. If a
+    // newer release is found, the menu loop gets `UserEvent::UpdateAvailable`
+    // and surfaces a notification.
+    {
+        let proxy = proxy.clone();
+        let current = env!("CARGO_PKG_VERSION").to_string();
+        rt_handle.spawn_blocking(move || match updater::check_for_update(&current) {
+            Ok(Some(info)) => {
+                info!(latest = %info.latest_version, "update available");
+                let _ = proxy.send_event(UserEvent::UpdateAvailable(info));
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "update check failed (offline?)"),
+        });
+    }
 
     // Tunnel runs the runtime's block_on on a dedicated std::thread so it
     // owns the rt for its lifetime; when the tunnel exits, dropping rt aborts
@@ -429,10 +448,16 @@ fn main() -> Result<()> {
         }
         while let Ok(_e) = tray_channel.try_recv() {}
 
-        if let Event::UserEvent(UserEvent::StatusChanged(status)) = event {
+        // Single match — the two arms previously written as separate `if let`s
+        // would have both tried to move out of `event`.
+        let user_evt = match event {
+            Event::UserEvent(u) => Some(u),
+            _ => None,
+        };
+        if let Some(UserEvent::StatusChanged(status)) = &user_evt {
             // Status text — the native check column is rendered by macOS when
             // `set_checked(true)`. For other states the text describes itself.
-            let (icon_for_status, body, checked) = match &status {
+            let (icon_for_status, body, checked) = match status {
                 Status::Connecting => (
                     &icon_orange,
                     format!("Connecting…  {}", profile.ssh.host),
@@ -468,6 +493,26 @@ fn main() -> Result<()> {
                 let _ = t.set_tooltip(Some(tooltip));
             }
             status_item.set_text(&body);
+        }
+
+        if let Some(UserEvent::UpdateAvailable(info)) = &user_evt {
+            // One-shot user notification with the new version. Clicking it
+            // doesn't open a URL by itself (Notification Center doesn't pipe
+            // taps back to non-NSUserNotification apps), so we ALSO open the
+            // release page directly — the user can choose to ignore it.
+            let title = format!("БелкаТуннель {} is available", info.latest_version);
+            let body = format!(
+                "You're on {}. Click to view release notes / download.",
+                env!("CARGO_PKG_VERSION")
+            );
+            notify_user(&title, &body);
+            let url = info
+                .asset_url
+                .clone()
+                .unwrap_or_else(|| info.release_url.clone());
+            let _ = std::process::Command::new("/usr/bin/open")
+                .arg(&url)
+                .spawn();
         }
     });
 }

@@ -1,0 +1,108 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Allow manually re-running from the Actions tab.
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14  # arm64 host; we still produce a universal binary below.
+    permissions:
+      contents: write   # uploading release assets
+
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      RUST_BACKTRACE: short
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install Rust + targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: uv sync
+        run: uv sync --project tools --dev
+
+      - name: Sanity (fmt-check + clippy + test)
+        run: ./bt precommit
+
+      # ---------- Signing identity ----------
+      - name: Import codesigning certs
+        if: ${{ env.CERTIFICATES_P12 != '' }}
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASSWORD }}
+
+      # ---------- Build ----------
+      - name: Build universal binary
+        run: ./bt universal
+
+      - name: Bundle .app (signed if SIGN_IDENTITY is set)
+        env:
+          SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
+          USE_UNIVERSAL: "1"
+        run: ./bt bundle --universal
+
+      - name: Verify bundle
+        run: ./bt verify bundle
+
+      - name: Build DMG
+        run: ./bt dmg
+
+      # ---------- Notarize ----------
+      - name: Store notarytool credentials
+        if: ${{ secrets.APPLE_ID != '' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials BELKA-NOTARY \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD"
+
+      - name: Notarize + staple
+        if: ${{ secrets.SIGN_IDENTITY != '' && secrets.APPLE_ID != '' }}
+        env:
+          SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
+          NOTARY_PROFILE: BELKA-NOTARY
+        run: ./bt notarize
+
+      # ---------- Publish ----------
+      - name: Compute artefact name
+        id: artefact
+        run: |
+          VERSION=$(./bt --version || cargo pkgid --manifest-path app/Cargo.toml | sed 's/.*#//')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          ls -la app/dist/
+
+      - name: Upload DMG to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/dist/BelkaTunnel-*.dmg
+          generate_release_notes: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
