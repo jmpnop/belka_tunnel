@@ -57,6 +57,7 @@ fn main() -> Result<()> {
     // Hold the WorkerGuard for the entire process lifetime so the non-blocking
     // log writer thread keeps draining.
     let _log_guard = init_tracing();
+    install_panic_hook();
 
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--gui") {
@@ -518,6 +519,37 @@ fn main() -> Result<()> {
 /// the lifetime of the process — dropping it flushes the non-blocking file
 /// writer. Also installs daily rotation (kept files capped at 7) so a
 /// long-running tunnel doesn't grow an unbounded log.
+/// Route panics through `tracing::error!` so they land in the rolling log
+/// file as well as stderr. Without this, a panic in the tokio runtime thread
+/// (most commonly inside `run_forever`) is just a stderr line that no one
+/// will ever see — the daemon is a `LSUIElement=true` menu-bar app, its
+/// stderr stream is detached the moment macOS launches the bundle. Users
+/// would see the tunnel stop working with no breadcrumb in the log.
+///
+/// Chain to the default hook AFTER logging so cargo run / debug builds
+/// still print the panic to the terminal as well.
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let payload = info
+            .payload()
+            .downcast_ref::<&'static str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("Box<dyn Any>");
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string();
+        error!(thread, location, payload, "thread panicked");
+        default(info);
+    }));
+}
+
 fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let log_dir = directories::ProjectDirs::from("io", "celestialtech", "BelkaTunnel")
         .map(|d| d.data_dir().join("logs"))
