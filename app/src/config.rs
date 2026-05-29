@@ -110,13 +110,58 @@ impl ConfigFile {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let cfg: Self =
             serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
-        if !cfg.profiles.contains_key(&cfg.active) {
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Cheap sanity checks beyond what serde gives us. Runs on load so a
+    /// malformed config.json (which the watcher will now auto-pick up and
+    /// restart on) can't crash-loop the daemon. The validators target real
+    /// failure modes:
+    ///
+    /// * `backoff_multiplier <= 0`, NaN, or infinite would make
+    ///   `Duration::from_secs_f64(backoff * multiplier)` panic in
+    ///   `run_forever`'s reconnect path.
+    /// * `initial_backoff_secs == 0` would hot-spin the reconnect loop.
+    /// * `listen_port == 0` would bind an ephemeral port and break clients
+    ///   that expect the configured port.
+    /// * Dangling `active` produces a useless menu — surfaced as the same
+    ///   error the load path used to bail with.
+    pub fn validate(&self) -> Result<()> {
+        if !self.profiles.contains_key(&self.active) {
             anyhow::bail!(
                 "active profile '{}' does not exist in profiles list",
-                cfg.active
+                self.active
             );
         }
-        Ok(cfg)
+        for (name, p) in &self.profiles {
+            if p.socks.listen_port == 0 {
+                anyhow::bail!("profile '{name}': socks.listen_port must be > 0");
+            }
+            if p.ssh.port == 0 {
+                anyhow::bail!("profile '{name}': ssh.port must be > 0");
+            }
+            if p.reconnect.initial_backoff_secs == 0 {
+                anyhow::bail!("profile '{name}': reconnect.initial_backoff_secs must be > 0");
+            }
+            if p.reconnect.max_backoff_secs < p.reconnect.initial_backoff_secs {
+                anyhow::bail!(
+                    "profile '{name}': reconnect.max_backoff_secs ({}) < initial_backoff_secs ({})",
+                    p.reconnect.max_backoff_secs,
+                    p.reconnect.initial_backoff_secs
+                );
+            }
+            let m = p.reconnect.backoff_multiplier;
+            if !m.is_finite() || m <= 1.0 {
+                // Multiplier ≤ 1.0 means backoff never grows; combined with a
+                // long outage the daemon would retry forever at the initial
+                // interval. NaN / inf would panic Duration::from_secs_f64.
+                anyhow::bail!(
+                    "profile '{name}': reconnect.backoff_multiplier must be finite and > 1.0 (got {m})"
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -164,6 +209,89 @@ mod tests {
         std::fs::write(&path, r#"{"active":"ghost","profiles":{}}"#).unwrap();
         let err = ConfigFile::load(&path).unwrap_err().to_string();
         assert!(err.contains("ghost"), "got: {err}");
+    }
+
+    fn write_cfg(path: &Path, multiplier: f64, init: u64, max: u64, socks_port: u16) {
+        let body = format!(
+            r#"{{
+                "active": "default",
+                "profiles": {{
+                    "default": {{
+                        "ssh": {{
+                            "host": "x", "port": 22, "user": "u",
+                            "key_path": "/k", "keepalive_secs": 30
+                        }},
+                        "socks": {{ "listen_addr": "127.0.0.1", "listen_port": {socks_port} }},
+                        "reconnect": {{
+                            "initial_backoff_secs": {init}, "max_backoff_secs": {max},
+                            "backoff_multiplier": {multiplier}
+                        }}
+                    }}
+                }}
+            }}"#
+        );
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn rejects_zero_socks_port() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        write_cfg(&path, 2.0, 1, 60, 0);
+        let err = ConfigFile::load(&path).unwrap_err().to_string();
+        assert!(err.contains("listen_port"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_zero_initial_backoff() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        write_cfg(&path, 2.0, 0, 60, 1080);
+        let err = ConfigFile::load(&path).unwrap_err().to_string();
+        assert!(err.contains("initial_backoff_secs"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_max_below_initial_backoff() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        write_cfg(&path, 2.0, 30, 5, 1080);
+        let err = ConfigFile::load(&path).unwrap_err().to_string();
+        assert!(err.contains("max_backoff_secs"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_pathological_backoff_multipliers() {
+        for &m in &[0.0, -1.0, 1.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("c.json");
+            // serde_json rejects NaN/Inf in strict mode, so encode NaN/Inf as
+            // string-substitution after to_string; for now skip non-finite
+            // cases that JSON itself disallows.
+            if !m.is_finite() {
+                // Hand-construct since JSON has no NaN/Inf literal.
+                let token = match m.classify() {
+                    std::num::FpCategory::Nan => "NaN",
+                    _ if m.is_sign_positive() => "Infinity",
+                    _ => "-Infinity",
+                };
+                let body = format!(
+                    r#"{{"active":"default","profiles":{{"default":{{"ssh":{{"host":"x","port":22,"user":"u","key_path":"/k","keepalive_secs":30}},"socks":{{"listen_addr":"127.0.0.1","listen_port":1080}},"reconnect":{{"initial_backoff_secs":1,"max_backoff_secs":60,"backoff_multiplier":{token}}}}}}}}}"#
+                );
+                std::fs::write(&path, body).unwrap();
+                // serde_json will refuse non-finite floats at parse time,
+                // which is itself a form of protection — the load() error
+                // surfaces it.
+                assert!(ConfigFile::load(&path).is_err(), "non-finite {m} accepted");
+                continue;
+            }
+            write_cfg(&path, m, 1, 60, 1080);
+            let err = ConfigFile::load(&path).unwrap_err().to_string();
+            assert!(
+                err.contains("backoff_multiplier"),
+                "multiplier {m} got: {err}"
+            );
+        }
     }
 
     /// Old configs may still carry the old `hide_status_dot` field — serde's
