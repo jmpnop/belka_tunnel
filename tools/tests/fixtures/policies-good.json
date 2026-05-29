@@ -1,0 +1,17 @@
+{
+  "policies": {
+    "Proxy": {
+      "Mode": "manual",
+      "SOCKSProxy": "127.0.0.1:1080",
+      "SOCKSVersion": 5,
+      "UseProxyForDNS": true,
+      "Locked": true
+    },
+    "DNSOverHTTPS": { "Enabled": true, "Locked": true },
+    "EnableTrackingProtection": { "Value": true, "Locked": true },
+    "WebRTCIPHandling": { "Mode": "disable_non_proxied_udp", "Locked": true },
+    "DisableAppUpdate": true,
+    "AppAutoUpdate": false,
+    "BackgroundAppUpdate": false
+  }
+}

@@ -330,27 +330,23 @@ fn main() -> Result<()> {
                         "Firefox install already running",
                         "Wait for the current install to finish before starting another.",
                     );
-                } else if let Err(e) = firefox::install_or_update_async(
-                    socks_host_for_firefox.clone(),
-                    socks_port_for_firefox,
-                    {
-                        // Wrap the notify so the BUSY flag is cleared on success
-                        // and failure terminal events. install_or_update_async
-                        // emits "Firefox is ready" or "Firefox install failed"
-                        // as the last call — both clear the flag.
-                        let inner = notify_user;
-                        move |title: &str, body: &str| {
-                            inner(title, body);
-                            if title.starts_with("Firefox is ready")
-                                || title.starts_with("Firefox install failed")
-                            {
-                                FIREFOX_INSTALL_BUSY.store(false, Ordering::Release);
-                            }
-                        }
-                    },
-                ) {
-                    FIREFOX_INSTALL_BUSY.store(false, Ordering::Release);
-                    macos_alert("Couldn't start Firefox install", &format!("{e}"));
+                } else {
+                    // Pass the RAII guard into the spawned install thread —
+                    // the flag clears on Drop regardless of how the thread
+                    // exits (success / error / panic).
+                    let guard = BusyFlagGuard(&FIREFOX_INSTALL_BUSY);
+                    if let Err(e) = firefox::install_or_update_async(
+                        socks_host_for_firefox.clone(),
+                        socks_port_for_firefox,
+                        notify_user,
+                        guard,
+                    ) {
+                        // guard already dropped on Err path before we get here;
+                        // explicitly clear in case the function returned without
+                        // moving the guard into a thread.
+                        FIREFOX_INSTALL_BUSY.store(false, Ordering::Release);
+                        macos_alert("Couldn't start Firefox install", &format!("{e}"));
+                    }
                 }
             } else if event.id == install_homebrew_id {
                 use std::sync::atomic::Ordering;
@@ -363,18 +359,10 @@ fn main() -> Result<()> {
                         "A poller is already watching for brew to appear.",
                     );
                 } else {
-                    firefox::install_homebrew_async({
-                        let inner = notify_user;
-                        move |title: &str, body: &str| {
-                            inner(title, body);
-                            if title.starts_with("Homebrew installed")
-                                || title.starts_with("Homebrew install")
-                                || title.starts_with("Couldn't open Terminal")
-                            {
-                                HOMEBREW_INSTALL_BUSY.store(false, Ordering::Release);
-                            }
-                        }
-                    });
+                    firefox::install_homebrew_async(
+                        notify_user,
+                        BusyFlagGuard(&HOMEBREW_INSTALL_BUSY),
+                    );
                 }
             } else if event.id == uninstall_firefox_id {
                 if macos_confirm(

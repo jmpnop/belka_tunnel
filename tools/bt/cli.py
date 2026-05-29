@@ -70,8 +70,19 @@ def lint() -> None:
 
 @app.command()
 def test() -> None:
-    """`cargo test --release`."""
+    """`cargo test --release` + pytest on tools/tests."""
     build.cargo_test()
+    pytest()
+
+
+@app.command()
+def pytest() -> None:
+    """Run the Python harness's own pytest suite."""
+    util.step("pytest")
+    util.run(
+        ["uv", "run", "--dev", "--project", str(util.REPO_ROOT / "tools"), "pytest", "-q"],
+        cwd=util.REPO_ROOT,
+    )
 
 
 # ---------- Verify ----------

@@ -111,6 +111,7 @@ pub fn install_or_update_async(
     socks_host: String,
     socks_port: u16,
     notify: impl Fn(&str, &str) + Send + 'static,
+    busy_guard: crate::BusyFlagGuard,
 ) -> Result<()> {
     info!("starting direct Firefox install");
     notify(
@@ -118,6 +119,10 @@ pub fn install_or_update_async(
         "~150 MB from download.mozilla.org. You'll get a notification when it's done.",
     );
     std::thread::spawn(move || {
+        // The guard's Drop clears FIREFOX_INSTALL_BUSY no matter how this
+        // thread exits — clean return, error path, or panic.
+        let _g = busy_guard;
+
         if let Err(e) = install_firefox_direct() {
             warn!(error = %e, "Firefox install failed");
             notify("Firefox install failed", &format!("{e}"));
@@ -445,7 +450,10 @@ pub fn uninstall_async(notify: impl Fn(&str, &str) + Send + 'static) -> Result<(
 /// (Homebrew's install script refuses to run as root, so we can't bypass
 /// Terminal cleanly). Background-polls for `brew` to appear and notifies
 /// when it's ready.
-pub fn install_homebrew_async(notify: impl Fn(&str, &str) + Send + 'static) {
+pub fn install_homebrew_async(
+    notify: impl Fn(&str, &str) + Send + 'static,
+    busy_guard: crate::BusyFlagGuard,
+) {
     // The official install command, as documented on https://brew.sh.
     let install_cmd = r#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#;
     let osascript = format!(
@@ -466,6 +474,7 @@ end tell"#,
             "Run this in Terminal manually:\n\
              /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"",
         );
+        // busy_guard dropped here on the early-return path.
         return;
     }
 
@@ -476,6 +485,8 @@ end tell"#,
     );
 
     std::thread::spawn(move || {
+        // Clears HOMEBREW_INSTALL_BUSY no matter how this poller exits.
+        let _g = busy_guard;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(5));
