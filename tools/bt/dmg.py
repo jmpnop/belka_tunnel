@@ -89,10 +89,6 @@ size = "300M"
 icon = {str(icon)!r}
 background = {str(bg)!r}
 window_rect = ((100, 100), {WINDOW_SIZE!r})
-# Dark Finder appearance forces white icon labels — without this, the
-# BelkaTunnel.app / Applications text under each icon renders black,
-# which is unreadable on the darkened tunnel-between-trees background.
-appearance = "dark"
 icon_size = {ICON_SIZE}
 text_size = {TEXT_SIZE}
 icon_locations = {{
@@ -216,9 +212,7 @@ icon_locations = {{
     appname:        {APP_ICON_POS!r},
     "Applications": {APPLICATIONS_ICON_POS!r},
 }}
-# Dark Finder appearance forces white icon labels for legibility on the
 # darkened background image.
-appearance = "dark"
 
 default_view = "icon-view"
 show_status_bar = False
