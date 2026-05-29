@@ -26,13 +26,7 @@ WINDOW_SIZE = (800, 448)
 APP_ICON_POS = (200, 240)
 APPLICATIONS_ICON_POS = (600, 240)
 ICON_SIZE = 128
-# Finder's overlay label text. The visible labels ("BelkaTunnel.app",
-# "Applications") are BAKED INTO the background PNG as white text at
-# the right positions. Finder still draws its own overlay text on top —
-# we set text_size to the smallest Finder will honour so that overlay
-# barely shows. Combined with the dark gradient at the bottom of the
-# bg, the painted-in white labels are what the user actually reads.
-TEXT_SIZE = 8
+TEXT_SIZE = 14
 
 
 def cargo_version() -> str:
@@ -129,10 +123,102 @@ arrange_by = None
     finally:
         settings_path.unlink(missing_ok=True)
 
+    _force_white_label_text(out, "БелкаТуннель")
     _set_file_icon(out, icon)
     size_mb = out.stat().st_size / 1024 / 1024
     util.ok(f"installer ready: {out} ({size_mb:.1f} MB)")
     return out
+
+
+def _force_white_label_text(dmg_path: Path, volume_name: str) -> None:
+    """Make the icon labels render white instead of black.
+
+    Modern macOS Finder doesn't expose an icon-label text colour through
+    AppleScript or dmgbuild settings. The workaround in this repo:
+    convert the freshly built UDZO image to UDRW, mount it read-write,
+    write a custom `.DS_Store` whose `bwsp` (browser window settings
+    plist) carries `WindowAppearance = NSAppearanceNameDarkAqua` — Finder
+    respects that on the per-window scope and switches its label text
+    to white, regardless of the user's system theme. Then convert back
+    to UDZO and clean up.
+    """
+    import subprocess
+
+    rw = dmg_path.with_suffix(".rw.dmg")
+    if rw.exists():
+        rw.unlink()
+    subprocess.run(
+        ["hdiutil", "convert", str(dmg_path),
+         "-format", "UDRW", "-o", str(rw), "-quiet"],
+        check=True,
+    )
+    attach_out = subprocess.run(
+        ["hdiutil", "attach", "-readwrite", "-noverify",
+         "-noautoopen", "-nobrowse", "-plist", str(rw)],
+        capture_output=True, text=True, check=True,
+    )
+    import plistlib
+    info = plistlib.loads(attach_out.stdout.encode("utf-8"))
+    mount_point = next(
+        (e["mount-point"] for e in info.get("system-entities", []) if e.get("mount-point")),
+        None,
+    )
+    if not mount_point:
+        raise RuntimeError("hdiutil attach: no mount point in output")
+    try:
+        _write_dark_window_dsstore(Path(mount_point), volume_name)
+    finally:
+        subprocess.run(
+            ["hdiutil", "detach", mount_point, "-force", "-quiet"],
+            check=False,
+        )
+    # Convert back to compressed UDZO and replace the original.
+    dmg_path.unlink()
+    subprocess.run(
+        ["hdiutil", "convert", str(rw),
+         "-format", "UDZO", "-imagekey", "zlib-level=9",
+         "-o", str(dmg_path), "-quiet"],
+        check=True,
+    )
+    rw.unlink(missing_ok=True)
+
+
+def _write_dark_window_dsstore(volume_root: Path, volume_name: str) -> None:
+    """Replace `.DS_Store` at the root of a mounted DMG so the next time
+    Finder opens it, the window uses Dark Aqua appearance — which is what
+    flips the icon label text from black to white.
+
+    The bwsp blob is a binary plist Finder writes to remember per-window
+    state (size, sidebar, toolbar, …). We add a `WindowAppearance` key set
+    to `NSAppearanceNameDarkAqua`; Finder reads it on next-open and
+    applies the dark theme to that window only.
+    """
+    from ds_store import DSStore
+    import plistlib
+
+    ds_path = volume_root / ".DS_Store"
+
+    # Build the dark-appearance bwsp plist. Finder reads this on the next
+    # open of the window and applies the dark theme to that window only
+    # (so the user's system theme is untouched).
+    bwsp_plist = {
+        "ShowSidebar": False,
+        "ShowStatusBar": False,
+        "ShowTabView": False,
+        "ShowToolbar": False,
+        "ShowPathbar": False,
+        "ContainerShowSidebar": False,
+        "WindowBounds": "{{100, 100}, {800, 448}}",
+        "PreviewPaneVisibility": False,
+        "WindowAppearance": "NSAppearanceNameDarkAqua",
+    }
+    bwsp_bytes = plistlib.dumps(bwsp_plist, fmt=plistlib.FMT_BINARY)
+
+    # Mutate in place — preserves dmgbuild's icon positions (Iloc), bg
+    # reference (BKGD), and other entries it wrote. ds_store's "r+" mode
+    # opens for read+write without truncating.
+    with DSStore.open(str(ds_path), "r+") as d:
+        d["."]["bwsp"] = ("blob", bwsp_bytes)
 
 
 def _set_file_icon(target: Path, icon_path: Path) -> None:
@@ -247,6 +333,7 @@ arrange_by = None
         settings_path.unlink(missing_ok=True)
     _ = PFUSERS_DIR  # silence unused; useful when we add asset paths later
 
+    _force_white_label_text(out, "pfUsers")
     if icon_path.exists():
         _set_file_icon(out, icon_path)
     size_mb = out.stat().st_size / 1024 / 1024
