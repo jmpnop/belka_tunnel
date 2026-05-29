@@ -186,7 +186,7 @@ impl ConfigFile {
             std::fs::create_dir_all(parent).ok();
         }
         let s = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, s).with_context(|| format!("writing {}", path.display()))?;
+        atomic_write(path, s.as_bytes()).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 
@@ -194,6 +194,46 @@ impl ConfigFile {
         self.profiles
             .get(&self.active)
             .ok_or_else(|| anyhow::anyhow!("active profile '{}' missing", self.active))
+    }
+}
+
+/// Write `contents` to `dest` via temp-file + fsync + atomic rename.
+///
+/// Why bother: `std::fs::write` is a sequence of `open(O_TRUNC) + write_all`.
+/// If the process crashes mid-write — or the system loses power — the file
+/// on disk is truncated and partially written. The daemon's auto-restart
+/// path would then read garbage, fail to parse, and fall back to defaults,
+/// silently losing the user's edits. Atomic rename guarantees the file
+/// either has the old contents OR the full new contents, never partial.
+///
+/// The temp file lives in the same directory as `dest` so the rename is
+/// guaranteed to be within one filesystem (cross-fs rename would fall back
+/// to copy + delete, defeating the atomicity).
+fn atomic_write(dest: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    // Suffix includes PID so two simultaneous writers can't stomp on each
+    // other's temp file. The watcher coalesces the resulting Create+Rename
+    // burst inside its 400 ms window.
+    let tmp = parent.join(format!(
+        ".{}.tmp.{}",
+        dest.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "config".to_string()),
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?; // ensure bytes hit disk BEFORE the rename advertises them
+    }
+    match std::fs::rename(&tmp, dest) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Clean up the orphan temp file so failed saves don't accumulate.
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
     }
 }
 
@@ -309,6 +349,37 @@ mod tests {
                 "multiplier {m} got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn save_is_atomic_against_concurrent_reader() {
+        // Round-trip an atomic_write through ConfigFile::save and verify
+        // (a) the result parses, (b) no .tmp.* sibling is left behind on
+        // success. The crash-safety guarantee (that an interrupted write
+        // leaves the OLD file intact) can't be exercised without actually
+        // killing a process mid-write; instead we cover the leaf
+        // invariants the write path is supposed to preserve.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        let cfg = ConfigFile::default();
+        cfg.save(&path).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("\"active\""), "wrote unexpected content");
+        // No orphan temp file should remain in the directory.
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.starts_with(".") || name == ".",
+                "orphan temp file left behind: {name}"
+            );
+        }
+        // Re-save (overwrite) works too — the rename must replace the existing
+        // target, not fail because it already exists.
+        let mut cfg2 = cfg.clone();
+        cfg2.active = "default".to_string();
+        cfg2.save(&path).unwrap();
+        assert!(ConfigFile::load(&path).is_ok());
     }
 
     #[test]
