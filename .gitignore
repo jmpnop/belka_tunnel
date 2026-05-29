@@ -1,0 +1,21 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+._*
+
+# Rust build
+app/target/
+app/dist/
+app/icon-work/
+
+# Local config / test files
+app/test-config.toml
+
+# IDE
+.idea/
+*.iml
+.vscode/

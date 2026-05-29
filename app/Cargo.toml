@@ -1,0 +1,54 @@
+[package]
+name = "proxy-tunnel"
+version = "0.1.0"
+edition = "2021"
+description = "SSH SOCKS5 tunnel daemon with auto-reconnect (aurora.celestialtech.io)"
+
+[[bin]]
+name = "proxy-tunnel"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+russh = "0.45"
+russh-keys = "0.45"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+eframe = { version = "0.30", default-features = false, features = ["default_fonts", "glow"] }
+rfd = "0.15"
+local-ip-address = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder", "NSRunningApplication"] }
+objc2-foundation = { version = "0.2", features = ["NSThread"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Menu-bar UI
+tao = "0.35"
+tray-icon = "0.24"
+muda = "0.19"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+include_dir = "0.7"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+[package.metadata.bundle]
+name = "BelkaTunnel"
+identifier = "io.celestialtech.BelkaTunnel"
+icon = ["assets/AppIcon.icns"]
+version = "0.1.0"
+copyright = "Copyright (c) 2026 Pasha"
+category = "Utility"
+short_description = "SSH SOCKS5 tunnel daemon"
+long_description = "БелкаТуннель — persistent SSH SOCKS5 tunnel with auto-reconnect."
+osx_minimum_system_version = "11.0"
