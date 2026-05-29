@@ -37,7 +37,19 @@ impl Control {
         }
     }
     pub fn set_enabled(&self, on: bool) {
-        let _ = self.tx.send(on);
+        // send_if_modified skips the version bump (and the wakeup of waiting
+        // .changed() callers) when the value is unchanged. Matters for the
+        // reconnect-backoff path: run_forever races sleep() against
+        // ctl_rx.changed(), and a no-op set_enabled(current) would otherwise
+        // cut the backoff short for no reason.
+        self.tx.send_if_modified(|v| {
+            if *v != on {
+                *v = on;
+                true
+            } else {
+                false
+            }
+        });
     }
     pub fn is_enabled(&self) -> bool {
         *self.rx.borrow()
@@ -331,6 +343,19 @@ mod tests {
             .expect("waiter panicked");
         assert!(v);
         assert!(ctl.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn control_no_op_set_does_not_wake_subscribers() {
+        // set_enabled(current) must NOT bump the watch version — otherwise
+        // run_forever's tokio::select!(sleep, changed) would short-circuit
+        // the backoff on a no-op menu flip.
+        let ctl = Control::new(true);
+        let mut rx = ctl.subscribe();
+        ctl.set_enabled(true); // no-op
+        ctl.set_enabled(true); // still no-op
+        let r = tokio::time::timeout(Duration::from_millis(150), rx.changed()).await;
+        assert!(r.is_err(), "no-op set_enabled spuriously woke a subscriber");
     }
 
     #[tokio::test]
