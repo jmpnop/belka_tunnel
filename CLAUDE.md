@@ -1,12 +1,8 @@
-# БелкаТуннель + pfUsers
+# БелкаТуннель
 
-This repo is a Cargo workspace with two macOS apps that work together:
+Setting up an SSH-based SOCKS5 proxy that routes Olga's traffic through Pasha's pfSense WAN IP. The native macOS app under `app/` is `БелкаТуннель`; the working directory is still `~/PycharmProjects/ssh-proxy-wan/` (unrenamed to keep paths stable).
 
-- **БелкаТуннель** (`app/`) — menu-bar SSH SOCKS5 tunnel daemon, runs on Olga's Mac
-- **pfUsers** (`pfusers/`) — windowed admin app, runs on Pasha's Mac, manages the tunnel users on pfSense
-- `crates/belka-ui/` — Zed-inspired dark theme + form widgets, shared by both apps
-
-The original goal was the tunnel itself; pfUsers came out of needing to keep the router-side user accounts honest as the deployment evolved. The working directory is still `~/PycharmProjects/ssh-proxy-wan/` (unrenamed to keep paths stable).
+The repo grew a small companion tool — **pfUsers** under `pfusers/` — for managing the router-side tunnel user accounts (created when olga needed her `user-shell-access` priv tightened to `user-ssh-tunnel`). It's documented later in this file under *Native macOS app — pfUsers*, and shares the Zed-inspired theme via `crates/belka-ui/`. BelkaTunnel itself is the project; pfUsers is in service of it.
 
 Architecture:
 
