@@ -92,11 +92,6 @@ struct App {
     delete_confirm_text: String,
     show_settings: bool,
     settings_form: AppConfig,
-    /// Username whose password we're resetting. `Some` opens the modal.
-    reset_password_target: Option<String>,
-    /// Buffer for the password input inside the reset modal. Cleared on
-    /// open/close — never lingers in memory longer than necessary.
-    reset_password_buf: String,
 }
 
 /// Anything the async tasks update needs to live behind a Mutex so the egui
@@ -167,8 +162,6 @@ impl App {
             delete_confirm_text: String::new(),
             show_settings: false,
             settings_form: cfg,
-            reset_password_target: None,
-            reset_password_buf: String::new(),
         };
         app.spawn_connect();
         app
@@ -392,39 +385,6 @@ impl App {
         });
     }
 
-    fn spawn_set_password(&self, name: String, password: String) {
-        let handle = match &self.state.lock().unwrap().conn {
-            ConnState::Connected(h) => h.clone(),
-            _ => return,
-        };
-        let state = self.state.clone();
-        {
-            let mut s = state.lock().unwrap();
-            s.pending_op = Some(format!("Resetting password for {name}…"));
-        }
-        let name_for_msg = name.clone();
-        self.rt.spawn(async move {
-            let r = pfsense::set_password(&handle, &name, &password).await;
-            // Zeroise our copy of the password as soon as the SSH call returns.
-            // Not cryptographic zeroisation (Rust can't guarantee that without
-            // a `secrecy`/`zeroize` crate), but it does drop the heap buffer
-            // promptly rather than waiting for the closure to be dropped.
-            drop(password);
-            let mut s = state.lock().unwrap();
-            s.pending_op = None;
-            match r {
-                Ok(()) => {
-                    s.toast = Some((
-                        ToastKind::Success,
-                        format!("Password reset for {name_for_msg}."),
-                    ));
-                }
-                Err(e) => {
-                    s.toast = Some((ToastKind::Error, format!("Password reset failed: {e:#}")));
-                }
-            }
-        });
-    }
 }
 
 impl eframe::App for App {
@@ -450,9 +410,6 @@ impl eframe::App for App {
         }
         if self.show_settings {
             self.draw_settings_modal(ctx);
-        }
-        if self.reset_password_target.is_some() {
-            self.draw_reset_password_modal(ctx);
         }
     }
 }
@@ -641,7 +598,6 @@ impl App {
                 };
                 let mut save_clicked = false;
                 let mut delete_clicked = false;
-                let mut reset_password_clicked = false;
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(&buf.name)
@@ -727,20 +683,14 @@ impl App {
                     // never sets that field, so memberships round-trip
                     // unchanged.
 
-                    card(ui, |ui| {
-                        section_title(
-                            ui,
-                            "Password",
-                            Some(
-                                "Resets the bcrypt-hash field. The user's existing OS-level shell \
-                                 password is left alone — pfSense's web UI auth is what gets updated.",
-                            ),
-                        );
-                        if ghost_button(ui, "  Reset password…  ").clicked() {
-                            reset_password_clicked = true;
-                        }
-                    });
-                    ui.add_space(14.0);
+                    // Password card removed: pfSense only consumes the
+                    // bcrypt-hash field for Web UI login, and Pasha's sshd
+                    // is PasswordAuthentication=no (CLAUDE.md), so a
+                    // tunnel-only user like olga has no path that reads
+                    // the hash. The engine's pfsense::set_password is
+                    // still callable from anywhere a future maintainer
+                    // wants to surface password management — the GUI just
+                    // doesn't expose it.
 
                     Frame::none()
                         .fill(theme::DANGER.linear_multiply(0.08))
@@ -783,10 +733,6 @@ impl App {
                 if delete_clicked {
                     self.confirm_delete = self.selected.clone();
                     self.delete_confirm_text.clear();
-                }
-                if reset_password_clicked {
-                    self.reset_password_target = self.selected.clone();
-                    self.reset_password_buf.clear();
                 }
             });
     }
@@ -1030,89 +976,6 @@ impl App {
             self.delete_confirm_text.clear();
             self.selected = None;
             self.edit_buffer = None;
-        }
-    }
-
-    fn draw_reset_password_modal(&mut self, ctx: &egui::Context) {
-        let Some(target) = self.reset_password_target.clone() else {
-            return;
-        };
-        let mut cancel = false;
-        let mut submit = false;
-        egui::Window::new("Reset Password")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .frame(
-                Frame::none()
-                    .fill(theme::PANEL)
-                    .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
-                    .rounding(Rounding::same(10.0))
-                    .inner_margin(Margin::same(22.0)),
-            )
-            .show(ctx, |ui| {
-                // See draw_settings_modal for the rationale behind locking
-                // both min and max width: prevents the auto-sized window
-                // from growing each frame in response to INFINITY-desired
-                // child widgets.
-                let width = 420.0;
-                ui.set_min_width(width);
-                ui.set_max_width(width);
-                ui.label(
-                    RichText::new(format!("Reset password for \"{target}\""))
-                        .color(theme::TEXT_PRIMARY)
-                        .size(15.0)
-                        .strong(),
-                );
-                ui.label(
-                    RichText::new(
-                        "Writes a new bcrypt-hash to config.xml (cost=10). Take effect on \
-                         next web-UI login. The user's existing SSH key-based access is \
-                         unaffected.",
-                    )
-                    .color(theme::TEXT_MUTED)
-                    .size(11.5),
-                );
-                ui.add_space(12.0);
-                field(ui, "New password", None, |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.reset_password_buf)
-                            .password(true)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ghost_button(ui, "  Cancel  ").clicked() {
-                        cancel = true;
-                    }
-                    ui.add_space(8.0);
-                    let valid = !self.reset_password_buf.is_empty();
-                    if ui
-                        .add_enabled(
-                            valid,
-                            egui::Button::new(
-                                RichText::new("  Reset Password  ")
-                                    .color(Color32::WHITE)
-                                    .strong(),
-                            )
-                            .fill(theme::ACCENT)
-                            .rounding(Rounding::same(8.0)),
-                        )
-                        .clicked()
-                    {
-                        submit = true;
-                    }
-                });
-            });
-        if cancel {
-            self.reset_password_target = None;
-            self.reset_password_buf.clear();
-        }
-        if submit {
-            let pw = std::mem::take(&mut self.reset_password_buf);
-            self.spawn_set_password(target, pw);
-            self.reset_password_target = None;
         }
     }
 
