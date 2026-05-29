@@ -47,13 +47,9 @@ def build_dmg() -> Path:
         raise SystemExit(1)
 
     version = cargo_version()
-    # dmgbuild always appends `.dmg` to its output filename. We build there
-    # and then rename to the requested `.img` extension.
-    intermediate = bundle.parent / f"BelkaTunnel-{version}.dmg"
-    out = bundle.parent / f"BelkaTunnel-{version}.img"
-    for p in (intermediate, out):
-        if p.exists():
-            p.unlink()
+    out = bundle.parent / f"BelkaTunnel-{version}.dmg"
+    if out.exists():
+        out.unlink()
     util.step(f"building installer → {out.name}")
 
     # dmgbuild reads a Python "settings file" with module-level assignments.
@@ -104,14 +100,13 @@ arrange_by = None
         import dmgbuild
 
         dmgbuild.build_dmg(
-            filename=str(intermediate),
+            filename=str(out),
             volume_name="БелкаТуннель",
             settings_file=str(settings_path),
         )
     finally:
         settings_path.unlink(missing_ok=True)
 
-    intermediate.rename(out)
     size_mb = out.stat().st_size / 1024 / 1024
     util.ok(f"installer ready: {out} ({size_mb:.1f} MB)")
     return out

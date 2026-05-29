@@ -38,7 +38,7 @@ def cmd_notarize() -> None:
         raise SystemExit(2)
 
     version = _dmg.cargo_version()
-    dmg_path = util.BUNDLE.parent / f"BelkaTunnel-{version}.img"
+    dmg_path = util.BUNDLE.parent / f"BelkaTunnel-{version}.dmg"
     if not dmg_path.exists():
         util.fail(f"missing {dmg_path} — run `bt dmg` first")
         raise SystemExit(1)
