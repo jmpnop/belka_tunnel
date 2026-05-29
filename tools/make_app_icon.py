@@ -44,11 +44,19 @@ ICONSET_SIZES = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OUT_ICNS = REPO_ROOT / "app" / "assets" / "AppIcon.icns"
+# This script renders the DMG file icon (papal-purple БТ), NOT the
+# .app bundle icon (which is the original BelkaTunnel design). The .app
+# icon at app/assets/AppIcon.icns is untouched.
+OUT_ICNS = REPO_ROOT / "app" / "assets" / "DmgIcon.icns"
 
-# Font search order — macOS system fonts that ship with Cyrillic glyphs.
-# Bold weights read better at small sizes than regular.
+# Font search order. NewCenturySchoolbookC is a Cyrillic-capable serif
+# face (the 'C' suffix marks the Cyrillic variant) that Pasha keeps in
+# his user font folder. Bold weight reads better at 16/32 px sizes.
+# Falls through to system fonts only if the preferred face is missing.
+HOME = Path.home()
 FONT_CANDIDATES = [
+    str(HOME / "Library" / "Fonts" / "NewCenturySchoolbookC-Bold.ttf"),
+    str(HOME / "Library" / "Fonts" / "NewCenturySchoolbookC.ttf"),
     "/System/Library/Fonts/SFNS.ttf",
     "/System/Library/Fonts/SFNSRounded.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -60,6 +68,7 @@ FONT_CANDIDATES = [
 def find_font() -> str:
     for path in FONT_CANDIDATES:
         if Path(path).exists():
+            print(f"using font: {path}")
             return path
     raise SystemExit("no Cyrillic-capable system font found")
 
@@ -84,11 +93,12 @@ def render(size: int) -> Image.Image:
     img = draw_rounded_square(size, PURPLE)
     draw = ImageDraw.Draw(img)
 
-    # Pick a font size that fills ~58% of the canvas height — leaves a
-    # comfortable margin at the smallest icon sizes where the corners
-    # would otherwise crowd the letters.
+    # Pick a font size that fills ~46% of the canvas height. (Was 0.58;
+    # reduced by 20% per Pasha's feedback — the serif glyphs read better
+    # with more breathing room around them at 1024 px and don't get
+    # crowded by the rounded-square corners at 16 px.)
     font_path = find_font()
-    target_height = int(size * 0.58)
+    target_height = int(size * 0.46)
 
     # Binary-search the font size that yields target_height for "БТ".
     lo, hi = 8, size * 2
@@ -118,7 +128,10 @@ def render(size: int) -> Image.Image:
 
 
 def main() -> None:
-    iconset = REPO_ROOT / "app" / "assets" / "AppIcon.iconset"
+    # Iconset basename has to be 'DmgIcon' so iconutil writes
+    # DmgIcon.icns (the output name matches the basename — there's no
+    # explicit --output flag).
+    iconset = REPO_ROOT / "app" / "assets" / "DmgIcon.iconset"
     if iconset.exists():
         shutil.rmtree(iconset)
     iconset.mkdir(parents=True)
@@ -128,20 +141,16 @@ def main() -> None:
         img.save(iconset / name, "PNG")
         print(f"  {name:30}  {px}x{px}")
 
-    # iconutil --convert icns produces a single binary the OS can
-    # consume directly. The output name is enforced (it picks
-    # <iconset_basename>.icns); we rename to the canonical location.
     subprocess.run(
         ["iconutil", "--convert", "icns", str(iconset)],
         check=True,
     )
-    generated = REPO_ROOT / "app" / "assets" / "AppIcon.icns"
-    if not generated.exists():
-        sys.exit(f"iconutil produced no output at {generated}")
+    if not OUT_ICNS.exists():
+        sys.exit(f"iconutil produced no output at {OUT_ICNS}")
 
     # Clean up the intermediate folder; PNGs aren't checked in.
     shutil.rmtree(iconset)
-    print(f"\n→ {OUT_ICNS}  ({generated.stat().st_size // 1024} KB)")
+    print(f"\n→ {OUT_ICNS}  ({OUT_ICNS.stat().st_size // 1024} KB)")
 
 
 if __name__ == "__main__":
