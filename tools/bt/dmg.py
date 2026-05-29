@@ -26,7 +26,13 @@ WINDOW_SIZE = (800, 448)
 APP_ICON_POS = (200, 240)
 APPLICATIONS_ICON_POS = (600, 240)
 ICON_SIZE = 128
-TEXT_SIZE = 14
+# Finder's overlay label text. The visible labels ("BelkaTunnel.app",
+# "Applications") are BAKED INTO the background PNG as white text at
+# the right positions. Finder still draws its own overlay text on top —
+# we set text_size to the smallest Finder will honour so that overlay
+# barely shows. Combined with the dark gradient at the bottom of the
+# bg, the painted-in white labels are what the user actually reads.
+TEXT_SIZE = 8
 
 
 def cargo_version() -> str:
