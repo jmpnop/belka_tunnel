@@ -2,6 +2,7 @@
 
 mod about;
 mod config;
+mod config_watcher;
 mod firefox;
 mod gui;
 mod socks;
@@ -10,7 +11,7 @@ mod updater;
 
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -48,6 +49,8 @@ use crate::tunnel::Status;
 enum UserEvent {
     StatusChanged(Status),
     UpdateAvailable(updater::UpdateInfo),
+    /// `config.json` was rewritten on disk — self-restart to pick it up.
+    ConfigChanged,
 }
 
 fn main() -> Result<()> {
@@ -147,6 +150,26 @@ fn main() -> Result<()> {
     // Resolve paths used by menu items.
     let config_path = ConfigFile::default_path()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/proxy-tunnel-config.json"));
+
+    // File-system watcher on config.json. When the GUI editor saves (or you
+    // hand-edit), an event lands in the main event loop and the app
+    // self-restarts to pick up the new settings. The Watcher must outlive
+    // the event loop, so we leak it via Box::leak — the process exits when
+    // the user picks Quit, so leaking is fine.
+    let watcher_proxy = proxy.clone();
+    if let Some(parent) = config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match config_watcher::spawn(&config_path, move || {
+        let _ = watcher_proxy.send_event(UserEvent::ConfigChanged);
+    }) {
+        Ok(w) => {
+            Box::leak(Box::new(w));
+            info!(path = %config_path.display(), "watching config for changes");
+        }
+        Err(e) => warn!(error = %e, "could not start config watcher"),
+    }
+
     let log_path = directories::ProjectDirs::from("io", "celestialtech", "BelkaTunnel")
         .map(|d| d.data_dir().join("logs").join("proxy-tunnel.log"))
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/proxy-tunnel.log"));
@@ -232,7 +255,6 @@ fn main() -> Result<()> {
     let edit_config_item = MenuItem::new("Edit Configuration…", true, None);
     let reveal_data_item = MenuItem::new("Reveal Data Folder in Finder", true, None);
     let open_logs_item = MenuItem::new("Open Log File", true, None);
-    let restart_item = MenuItem::new("Restart (apply config changes)", true, None);
     let about_item = MenuItem::new("О БелкаТуннеле", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
 
@@ -251,7 +273,6 @@ fn main() -> Result<()> {
     menu.append(&edit_config_item)?;
     menu.append(&reveal_data_item)?;
     menu.append(&open_logs_item)?;
-    menu.append(&restart_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&about_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
@@ -280,7 +301,6 @@ fn main() -> Result<()> {
     let edit_config_id = edit_config_item.id().clone();
     let reveal_data_id = reveal_data_item.id().clone();
     let open_logs_id = open_logs_item.id().clone();
-    let restart_id = restart_item.id().clone();
     let copy_endpoints_id = copy_endpoints_item.id().clone();
     let listen_all_id = listen_all_item.id().clone();
     let status_toggle_id = status_item.id().clone();
@@ -383,17 +403,6 @@ fn main() -> Result<()> {
             } else if event.id == open_logs_id {
                 ensure_file_exists(&log_path);
                 open_path(&log_path);
-            } else if event.id == restart_id {
-                use std::sync::atomic::Ordering;
-                if RELAUNCH_BUSY
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    info!("restart requested");
-                    tray.take();
-                    relaunch_self();
-                    *control_flow = ControlFlow::Exit;
-                }
             } else if event.id == copy_endpoints_id {
                 if let Some(ep) = &primary_endpoint {
                     copy_to_clipboard(ep);
@@ -456,6 +465,23 @@ fn main() -> Result<()> {
                 let _ = t.set_tooltip(Some(tooltip));
             }
             status_item.set_text(&body);
+        }
+
+        if let Some(UserEvent::ConfigChanged) = &user_evt {
+            // Coalesce: if the watcher fires more than once (e.g. during a
+            // multi-step save), the relaunch guard above prevents a double
+            // exit. Notification gives the user a heads-up.
+            use std::sync::atomic::Ordering;
+            if RELAUNCH_BUSY
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                info!("config changed on disk; self-restarting");
+                notify_user("Config updated", "Applying the new БелкаТуннель settings…");
+                tray.take();
+                relaunch_self();
+                *control_flow = ControlFlow::Exit;
+            }
         }
 
         if let Some(UserEvent::UpdateAvailable(info)) = &user_evt {
