@@ -6,7 +6,7 @@ import sys
 
 import typer
 
-from . import build, smoke, util, verify
+from . import build, dmg, smoke, util, verify
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
 
@@ -91,6 +91,21 @@ def verify_bundle() -> None:
 def verify_policies() -> None:
     """Validate /Applications/Firefox.app/.../policies.json schema + locks."""
     verify.verify_policies()
+
+
+@verify_app.command("dmg")
+def verify_dmg() -> None:
+    """Mount the latest DMG and check it contains the .app + /Applications link."""
+    dmg.verify_dmg()
+
+
+# ---------- DMG ----------
+
+
+@app.command(name="dmg")
+def cmd_dmg() -> None:
+    """Build dist/BelkaTunnel-<version>.dmg (uses dmgbuild + the voxel-tree bg)."""
+    dmg.build_dmg()
 
 
 # ---------- Smoke / bench ----------

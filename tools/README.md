@@ -19,19 +19,38 @@ and resolve dependencies.
 ./bt                     # show all commands
 ./bt build --release     # cargo build --release
 ./bt bundle              # release build + dist/BelkaTunnel.app
+./bt dmg                 # build dist/BelkaTunnel-<version>.dmg (voxel-tree bg)
 ./bt lint                # cargo clippy -- -D warnings
 ./bt test                # cargo test --release
 ./bt verify bundle       # Info.plist keys, codesign, arch, icon
 ./bt verify policies     # check /Applications/Firefox.app .../policies.json
+./bt verify dmg          # mount the latest DMG and check its contents
 ./bt smoke-test          # launch app, verify menu, route HTTPS through tunnel
 ./bt bench               # throughput / latency / connection-rate / concurrency
 ./bt run-bundle          # kill any running instance, open the bundle
 ./bt log                 # tail the app log
-./bt nuke                # cargo clean + wipe app data (DESTRUCTIVE)
+./bt clean               # cargo clean + remove dist/
 ./bt precommit           # what the git pre-commit hook runs
 ./bt prepush             # what the git pre-push hook runs
 ./bt ci                  # everything: precommit + bundle + verify + smoke
 ```
+
+## DMG installer
+
+`./bt dmg` builds `app/dist/BelkaTunnel-<version>.dmg` via `dmgbuild`:
+- Background: `app/assets/dmg-background.png` (800×448) + `…@2x.png` (1600×900 retina).
+- `BelkaTunnel.app` placed at (200, 240) — over the left voxel tree.
+- `/Applications` symlink at (600, 240) — over the right voxel tree.
+- Window chrome hidden (no toolbar, sidebar, status bar) for a clean install UI.
+- Volume name "БелкаТуннель", compressed (UDZO) → ~12 MB.
+
+`./bt verify dmg` mounts the latest DMG read-only and asserts:
+- `BelkaTunnel.app` is present.
+- `Applications` is a symlink to `/Applications`.
+- Then detaches.
+
+To change layout (icon positions, window size), edit constants at the top of
+`tools/bt/dmg.py`.
 
 ## Git hooks
 

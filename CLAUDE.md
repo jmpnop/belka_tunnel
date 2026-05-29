@@ -167,14 +167,41 @@ A self-contained menu-bar app in Rust that maintains the tunnel without dependin
 - Tokio multi-thread runtime owns the tunnel + SOCKS server; main thread runs the `tao` event loop with `tray-icon` (required by macOS for menu-bar integration). A bridge thread forwards `Status` changes from a `watch` channel into `UserEvent` notifications so the menu-bar title can react to state.
 - Menu-bar title: `●` Connected · `○` Connecting · `✕` Disconnected. Menu shows host:port + status + Quit.
 
-### Build
+### Build / test / harness — the `bt` CLI
+
+All build/test/verify/bench operations live in a uv-managed Python CLI at
+`tools/`. Run `./bt` (from the repo root) for the full list. Highlights:
 
 ```
-cd app
-./build-app.sh
+./bt bootstrap          install git hooks + verify toolchain
+./bt bundle             cargo build --release + assemble dist/BelkaTunnel.app
+./bt dmg                build dist/BelkaTunnel-<version>.dmg (voxel-tree bg)
+./bt verify bundle      Info.plist + codesign + arch + icon
+./bt verify policies    policies.json schema + Locked/AppAutoUpdate invariants
+./bt verify dmg         mount the latest DMG + check contents
+./bt smoke-test         launch + verify menu + curl through tunnel
+./bt bench              throughput / latency / connection-rate / concurrency
+./bt ci                 full pipeline
 ```
 
-This runs `cargo build --release`, assembles `dist/BelkaTunnel.app`, ad-hoc signs it (`codesign --sign -`, required for recent macOS to launch unsigned bundles), and reregisters it with LaunchServices.
+Git hooks (`.githooks/`, installed by `bt bootstrap`):
+- `pre-commit` → fmt-check + clippy + test
+- `pre-push` → precommit + bundle + verify bundle/policies (caught the
+  missing `DisableAppUpdate` policy field in commit `24972a7` before it shipped)
+
+The low-level shell script `app/build-app.sh` still exists and is what
+`bt bundle` calls under the hood. `Cargo.toml` declares `recursion_limit = 512`
+because the policies.json generator uses a large `serde_json::json!{...}`.
+
+### DMG installer
+
+`./bt dmg` produces `app/dist/BelkaTunnel-<version>.dmg`:
+- Background image (`app/assets/dmg-background.png` 800×448 + `@2x.png`
+  1600×900) shows two voxel trees flanking a glowing tunnel.
+- `BelkaTunnel.app` sits over the left tree at (200, 240).
+- `/Applications` symlink over the right tree at (600, 240).
+- Window chrome hidden, volume name `БелкаТуннель`, compressed UDZO.
+- ~12 MB output, built via `dmgbuild` (deterministic, no AppleScript).
 
 ### Run
 
