@@ -190,10 +190,10 @@ fn main() -> Result<()> {
         None,
     );
     // The status line is a CheckMenuItem so its checkmark aligns with the
-    // system checkmark column — same horizontal position as the "Use neutral
-    // status icon" and "Listen on all interfaces" check rows below. When
-    // Connected, the native ✓ shows. Other states leave the slot empty and
-    // describe themselves in the text. Clicking still toggles the tunnel.
+    // system checkmark column — same horizontal position as the "Listen on
+    // all interfaces" check row below. When Connected, the native ✓ shows.
+    // Other states leave the slot empty and describe themselves in the text.
+    // Clicking still toggles the tunnel.
     let status_item = CheckMenuItem::new("Connecting…", true, false, None);
     let socks_header = MenuItem::new("SOCKS5 endpoints (clients connect here):", false, None);
     let endpoints = collect_endpoints(&profile.socks.listen_addr, profile.socks.listen_port);

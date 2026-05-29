@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import time
-from statistics import mean, median, quantiles
+from statistics import mean, median
 
 import httpx
 
