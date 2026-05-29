@@ -158,10 +158,17 @@ impl EditBuffer {
 struct AddForm {
     name: String,
     descr: String,
-    password: String,
     authorized_keys: String,
-    shell_access: bool,
-    web_access: bool,
+    // No password field. Tunnel users never log into the pfSense web UI,
+    // and Pasha's sshd is PasswordAuthentication=no. spawn_add_user
+    // generates a random throwaway secret to satisfy pfSense's
+    // local_user_set_password (which bails on an empty string) and
+    // immediately drops it — the resulting bcrypt-hash is effectively
+    // a random oracle that nobody can ever derive a matching password
+    // for.
+    //
+    // No privilege toggles. Every user pfUsers creates is by definition
+    // a tunnel user; spawn_add_user pins priv_list to user-ssh-tunnel.
 }
 
 impl App {
@@ -345,28 +352,36 @@ impl App {
             _ => return,
         };
         let state = self.state.clone();
-        let priv_list: Vec<String> = [
-            ("user-shell-access", form.shell_access),
-            ("page-all", form.web_access),
-        ]
-        .into_iter()
-        .filter_map(|(p, on)| if on { Some(p.to_string()) } else { None })
-        .collect();
+        // Tunnel-only — the whole point of pfUsers. derive_shell on the
+        // pfsense side maps this to /usr/local/sbin/ssh_tunnel_shell, so
+        // the OS-level account can do port forwarding (-D, -L, -R) but
+        // not exec a command. If a user needs more, the admin grants
+        // them more later from the detail form's Privileges card.
+        let priv_list: Vec<String> = vec!["user-ssh-tunnel".to_string()];
         {
             let mut s = state.lock().unwrap();
             s.pending_op = Some(format!("Creating {}…", form.name));
         }
         let name = form.name.clone();
         self.rt.spawn(async move {
+            // Random throwaway secret for the Web-UI hash field. pfSense's
+            // local_user_set_password bails on an empty string so we can't
+            // skip it entirely; instead we generate 32 bytes of entropy,
+            // bcrypt it inside pfsense::add_user, and drop the plaintext
+            // before the SSH call even returns. Nobody — including us —
+            // ever knows what it was, so the Web-UI login is effectively
+            // disabled-by-impossible-password.
+            let throwaway = random_secret_hex(32);
             let req = pfsense::AddUserReq {
                 name: &form.name,
                 descr: &form.descr,
-                password: &form.password,
+                password: &throwaway,
                 priv_list: priv_list.clone(),
                 groups: vec![],
                 authorized_keys: &form.authorized_keys,
             };
             let r = pfsense::add_user(&handle, req).await;
+            drop(throwaway);
             let refresh = pfsense::list_users(&handle).await;
             let mut s = state.lock().unwrap();
             s.pending_op = None;
@@ -882,29 +897,6 @@ impl App {
                 });
                 field(
                     ui,
-                    "Password",
-                    Some("Set on creation; can be reset later."),
-                    |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.add_form.password)
-                                .password(true)
-                                .desired_width(f32::INFINITY),
-                        );
-                    },
-                );
-                ui.horizontal(|ui| {
-                    ui.add(toggle_widget(
-                        "Shell access",
-                        &mut self.add_form.shell_access,
-                    ));
-                    ui.add_space(20.0);
-                    ui.add(toggle_widget(
-                        "Web UI (page-all)",
-                        &mut self.add_form.web_access,
-                    ));
-                });
-                field(
-                    ui,
                     "Initial SSH key",
                     Some("Optional. Paste one OpenSSH-format key per line."),
                     |ui| {
@@ -922,8 +914,7 @@ impl App {
                         do_cancel = true;
                     }
                     ui.add_space(8.0);
-                    let can_create =
-                        !self.add_form.name.trim().is_empty() && !self.add_form.password.is_empty();
+                    let can_create = !self.add_form.name.trim().is_empty();
                     if ui
                         .add_enabled(
                             can_create,
@@ -948,10 +939,7 @@ impl App {
             let form = AddForm {
                 name: self.add_form.name.trim().to_string(),
                 descr: self.add_form.descr.clone(),
-                password: self.add_form.password.clone(),
                 authorized_keys: self.add_form.authorized_keys.clone(),
-                shell_access: self.add_form.shell_access,
-                web_access: self.add_form.web_access,
             };
             self.spawn_add_user(form);
             self.show_add_dialog = false;
@@ -1207,6 +1195,24 @@ impl App {
             self.spawn_connect();
         }
     }
+}
+
+/// Read `n_bytes` from `/dev/urandom` and hex-encode. Used by the
+/// AddUser flow to produce a throwaway secret that gets bcrypt'd into
+/// the Web-UI hash field. Crashing the spawn on RNG failure is the
+/// right call — we should not silently write a predictable value if
+/// the platform RNG is unavailable.
+fn random_secret_hex(n_bytes: usize) -> String {
+    let mut bytes = vec![0u8; n_bytes];
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .expect("read /dev/urandom for throwaway password");
+    let mut out = String::with_capacity(n_bytes * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 fn count_keys(s: &str) -> usize {
