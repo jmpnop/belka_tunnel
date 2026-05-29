@@ -2,7 +2,7 @@
 //! the structure of BelkaTunnel's gui.rs profile editor.
 
 use crate::config::AppConfig;
-use crate::pfsh;
+use crate::pfsense;
 use crate::ssh;
 use crate::users::{PfUser, CANONICAL_PRIVILEGES};
 use anyhow::Result;
@@ -222,7 +222,7 @@ impl App {
             s.loading_users = true;
         }
         self.rt.spawn(async move {
-            let r = pfsh::list_users(&handle).await;
+            let r = pfsense::list_users(&handle).await;
             let mut s = state.lock().unwrap();
             s.loading_users = false;
             match r {
@@ -248,18 +248,20 @@ impl App {
             s.pending_op = Some(format!("Saving {}…", buf.name));
         }
         self.rt.spawn(async move {
-            let r = pfsh::update_user(
-                &handle,
-                &buf.name,
-                &buf.descr,
-                &buf.priv_list,
-                &buf.groups,
-                &buf.authorized_keys,
-                buf.disabled,
-            )
-            .await;
+            let req = pfsense::UpdateUserReq {
+                name: &buf.name,
+                descr: Some(buf.descr.as_str()),
+                priv_list: Some(buf.priv_list.clone()),
+                authorized_keys: Some(buf.authorized_keys.as_str()),
+                disabled: Some(buf.disabled),
+                // Audit #4: don't touch group memberships until a Groups UI
+                // exists. Sending None here preserves whatever pfSense's
+                // existing membership state was.
+                groups: None,
+            };
+            let r = pfsense::update_user(&handle, req).await;
             // Refresh after, so the UI reflects the canonical server state.
-            let refresh = pfsh::list_users(&handle).await;
+            let refresh = pfsense::list_users(&handle).await;
             let mut s = state.lock().unwrap();
             s.pending_op = None;
             match r {
@@ -295,17 +297,16 @@ impl App {
         }
         let name = form.name.clone();
         self.rt.spawn(async move {
-            let r = pfsh::add_user(
-                &handle,
-                &form.name,
-                &form.descr,
-                &form.password,
-                &priv_list,
-                &[],
-                &form.authorized_keys,
-            )
-            .await;
-            let refresh = pfsh::list_users(&handle).await;
+            let req = pfsense::AddUserReq {
+                name: &form.name,
+                descr: &form.descr,
+                password: &form.password,
+                priv_list: priv_list.clone(),
+                groups: vec![],
+                authorized_keys: &form.authorized_keys,
+            };
+            let r = pfsense::add_user(&handle, req).await;
+            let refresh = pfsense::list_users(&handle).await;
             let mut s = state.lock().unwrap();
             s.pending_op = None;
             match r {
@@ -334,8 +335,8 @@ impl App {
         }
         let name_for_msg = name.clone();
         self.rt.spawn(async move {
-            let r = pfsh::delete_user(&handle, &name).await;
-            let refresh = pfsh::list_users(&handle).await;
+            let r = pfsense::delete_user(&handle, &name).await;
+            let refresh = pfsense::list_users(&handle).await;
             let mut s = state.lock().unwrap();
             s.pending_op = None;
             match r {

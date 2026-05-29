@@ -8,7 +8,7 @@
 
 mod config;
 mod gui;
-mod pfsh;
+mod pfsense;
 mod ssh;
 mod users;
 

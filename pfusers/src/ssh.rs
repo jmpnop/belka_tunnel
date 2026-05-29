@@ -117,10 +117,29 @@ pub async fn connect(
     Ok((Arc::new(handle), tofu_value))
 }
 
-/// Open a channel, execute `command` non-interactively, return stdout +
-/// stderr + exit status. Used by pfsh::PfSshClient to run pfSsh.php
-/// invocations.
+/// Open a channel, execute `command` non-interactively (no stdin),
+/// return stdout + stderr + exit status. Used for read-only ops like
+/// `/bin/cat /cf/conf/config.xml` and `pw usermod …`.
 pub async fn exec_command(handle: &ClientHandle, command: &str) -> Result<ExecResult> {
+    exec_inner(handle, command, None).await
+}
+
+/// Like `exec_command` but pipes `stdin` into the remote process. Used to
+/// stream config.xml content into `cat > /cf/conf/config.xml.tmp` without
+/// needing to escape it as a shell arg.
+pub async fn exec_with_stdin(
+    handle: &ClientHandle,
+    command: &str,
+    stdin: &[u8],
+) -> Result<ExecResult> {
+    exec_inner(handle, command, Some(stdin)).await
+}
+
+async fn exec_inner(
+    handle: &ClientHandle,
+    command: &str,
+    stdin: Option<&[u8]>,
+) -> Result<ExecResult> {
     use russh::ChannelMsg;
     let mut channel = handle
         .channel_open_session()
@@ -130,6 +149,16 @@ pub async fn exec_command(handle: &ClientHandle, command: &str) -> Result<ExecRe
         .exec(true, command)
         .await
         .map_err(|e| anyhow!("exec request: {e}"))?;
+    if let Some(bytes) = stdin {
+        channel
+            .data(bytes)
+            .await
+            .map_err(|e| anyhow!("writing stdin: {e}"))?;
+        channel
+            .eof()
+            .await
+            .map_err(|e| anyhow!("sending eof: {e}"))?;
+    }
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
