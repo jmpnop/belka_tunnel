@@ -159,7 +159,7 @@ fn main() -> Result<()> {
     firefox_submenu.append(&PredefinedMenuItem::separator())?;
 
     let open_firefox_item = MenuItem::new(
-        "Open a private window (proxy preset)",
+        "Launch Firefox",
         firefox_info.installed(),
         None,
     );
@@ -305,12 +305,7 @@ fn main() -> Result<()> {
                     let _ = t.set_icon(Some(icon));
                 }
             } else if event.id == open_firefox_id {
-                let result = firefox::FirefoxProfile::ensure(
-                    &socks_host_for_firefox,
-                    socks_port_for_firefox,
-                )
-                .and_then(|p| p.launch());
-                if let Err(e) = result {
+                if let Err(e) = firefox::launch_default() {
                     error!(error = %e, "Firefox launch failed");
                     macos_alert(
                         "Couldn't launch Firefox",

@@ -64,77 +64,41 @@ fn locate_brew() -> Option<PathBuf> {
     None
 }
 
-// ---------- Profile management (existing flow) ----------
+// ---------- Launching Firefox ----------
 
-pub struct FirefoxProfile {
-    pub dir: PathBuf,
+/// Launch Firefox normally. The enterprise policy in the bundle already locks
+/// every connection to the SOCKS5 tunnel, so there's no per-launch setup —
+/// БелкаТуннель owns this Firefox install, and the user's default profile
+/// (with their bookmarks, history, logins, etc.) is the only profile we
+/// care about. No `-profile` flag, no `-no-remote`, no private-browsing
+/// autostart.
+pub fn launch_default() -> Result<()> {
+    let info = detect();
+    let bundle = info
+        .path
+        .ok_or_else(|| anyhow!("Firefox is not installed"))?;
+    info!(bundle = %bundle.display(), "launching Firefox");
+    std::process::Command::new("/usr/bin/open")
+        .arg("-a")
+        .arg(&bundle)
+        .spawn()
+        .context("spawn /usr/bin/open -a Firefox.app")?;
+    Ok(())
 }
 
-impl FirefoxProfile {
-    pub fn default_dir() -> Option<PathBuf> {
-        directories::ProjectDirs::from("io", "celestialtech", "BelkaTunnel")
-            .map(|d| d.data_dir().join("firefox-profile"))
-    }
-
-    pub fn ensure(socks_host: &str, socks_port: u16) -> Result<Self> {
-        let dir = Self::default_dir().ok_or_else(|| anyhow!("no data dir"))?;
-        std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
-        let user_js = dir.join("user.js");
-        let contents = format!(
-            r#"// Managed by БелкаТуннель — overwritten on every "Browse the web through tunnel" click.
-user_pref("network.proxy.type", 1);
-user_pref("network.proxy.socks", "{host}");
-user_pref("network.proxy.socks_port", {port});
-user_pref("network.proxy.socks_version", 5);
-user_pref("network.proxy.socks_remote_dns", true);
-user_pref("network.proxy.no_proxies_on", "");
-user_pref("browser.privatebrowsing.autostart", true);
-user_pref("media.peerconnection.enabled", false);
-user_pref("network.dns.disablePrefetch", true);
-user_pref("network.prefetch-next", false);
-user_pref("network.predictor.enabled", false);
-user_pref("browser.startup.homepage", "https://ifconfig.me/");
-user_pref("browser.startup.page", 1);
-user_pref("browser.startup.firstrunSkipsHomepage", true);
-user_pref("datareporting.policy.firstRunURL", "");
-user_pref("trailhead.firstrun.didSeeAboutWelcome", true);
-user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("browser.aboutConfig.showWarning", false);
-"#,
-            host = socks_host,
-            port = socks_port
-        );
-        std::fs::write(&user_js, contents)
-            .with_context(|| format!("writing {}", user_js.display()))?;
-        Ok(Self { dir })
-    }
-
-    pub fn launch(&self) -> Result<()> {
-        let info = detect();
-        let bundle = info
-            .path
-            .ok_or_else(|| anyhow!("Firefox is not installed"))?;
-        let binary = find_firefox_binary(&bundle)
-            .ok_or_else(|| anyhow!("Firefox binary missing inside {}", bundle.display()))?;
-        info!(firefox = %binary.display(), profile = %self.dir.display(), "launching Firefox");
-        std::process::Command::new(binary)
-            .arg("-profile")
-            .arg(self.dir.as_os_str())
-            .arg("-no-remote")
-            .spawn()
-            .context("spawn firefox")?;
-        Ok(())
-    }
-}
-
-fn find_firefox_binary(bundle: &Path) -> Option<PathBuf> {
-    for name in ["firefox", "firefox-bin"] {
-        let p = bundle.join("Contents/MacOS").join(name);
-        if p.exists() {
-            return Some(p);
+/// Remove any orphaned BelkaTunnel-managed Firefox profile from previous
+/// versions of the app. Best-effort; doesn't fail the caller on error.
+pub fn cleanup_legacy_profile() {
+    let Some(dirs) = directories::ProjectDirs::from("io", "celestialtech", "BelkaTunnel") else {
+        return;
+    };
+    let legacy = dirs.data_dir().join("firefox-profile");
+    if legacy.exists() {
+        match std::fs::remove_dir_all(&legacy) {
+            Ok(()) => info!(path = %legacy.display(), "removed legacy firefox-profile dir"),
+            Err(e) => warn!(path = %legacy.display(), error = %e, "could not remove legacy firefox-profile dir"),
         }
     }
-    None
 }
 
 // ---------- Install / Uninstall ----------
@@ -171,15 +135,15 @@ pub fn install_or_update_async(
             Err(e) => warn!(error = %e, "could not install enterprise policy"),
         }
 
-        // Also seed the isolated БелкаТуннель profile so the menu item still
-        // gets private-browsing autostart + ifconfig.me homepage as a clean test.
-        if let Err(e) = FirefoxProfile::ensure(&socks_host, socks_port) {
-            warn!(error = %e, "could not seed isolated profile");
-        }
+        // Clean up the legacy isolated profile from older versions of the app.
+        cleanup_legacy_profile();
+
+        // Argument suppresses the dead-code warning on now-unused params.
+        let _ = (socks_host.is_empty(), socks_port);
 
         notify(
             "Firefox is ready",
-            "Installed to /Applications. The SOCKS5 proxy is enforced by Firefox enterprise policy — every window goes through the tunnel and the setting is locked.",
+            "Installed to /Applications. Every Firefox window now routes through the tunnel — the proxy is enforced by enterprise policy and can't be turned off.",
         );
     });
     Ok(())
