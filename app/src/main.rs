@@ -163,20 +163,21 @@ fn main() -> Result<()> {
         firefox_info.installed(),
         None,
     );
-    // The install item is always clickable: if Homebrew is missing it will
-    // bootstrap Homebrew first (via Terminal) and then install Firefox.
+    // Firefox install is a self-contained DMG download — no Homebrew, no
+    // browser. The label switches between fresh-install and update-in-place.
     let install_firefox_item = MenuItem::new(
-        match (firefox_info.installed(), firefox_info.brew.is_some()) {
-            (true, true) => "Reinstall / update Firefox via Homebrew",
-            (false, true) => "Install Firefox via Homebrew",
-            (true, false) => "Reinstall Firefox (installs Homebrew first if needed)",
-            (false, false) => "Install Firefox (installs Homebrew first if needed)",
+        if firefox_info.installed() {
+            "Reinstall / update Firefox (latest from mozilla.org)"
+        } else {
+            "Install Firefox (latest from mozilla.org)"
         },
         true,
         None,
     );
+    // Homebrew install is shown only when brew is missing — it's an unrelated
+    // utility that some users may also want.
     let install_homebrew_item = MenuItem::new(
-        "Install Homebrew only (opens Terminal)",
+        "Install Homebrew (opens Terminal)",
         firefox_info.brew.is_none(),
         None,
     );
@@ -319,35 +320,11 @@ fn main() -> Result<()> {
                     );
                 }
             } else if event.id == install_firefox_id {
-                // If Homebrew isn't installed, offer to install both — Terminal
-                // for the brew install, then auto-chain Firefox once brew shows up.
-                let fresh_info = firefox::detect();
-                if fresh_info.brew.is_none() {
-                    if macos_confirm(
-                        "Homebrew is required",
-                        "Firefox is installed via Homebrew. Homebrew isn't on this Mac yet. \
-                         \n\nБелкаТуннель will open Terminal to install Homebrew, then \
-                         automatically install Firefox once Homebrew is ready. \
-                         Terminal will ask for your password.",
-                        "Install both",
-                    ) {
-                        firefox::install_homebrew_async(true, notify_user);
-                    }
-                } else {
-                    let result = firefox::install_or_update_async(notify_user);
-                    if let Err(e) = result {
-                        macos_alert("Couldn't start Firefox install", &format!("{e}"));
-                    }
+                if let Err(e) = firefox::install_or_update_async(notify_user) {
+                    macos_alert("Couldn't start Firefox install", &format!("{e}"));
                 }
             } else if event.id == install_homebrew_id {
-                if macos_confirm(
-                    "Install Homebrew?",
-                    "БелкаТуннель will open Terminal with the official Homebrew \
-                     install command. Terminal will ask for your password.",
-                    "Open Terminal",
-                ) {
-                    firefox::install_homebrew_async(false, notify_user);
-                }
+                firefox::install_homebrew_async(notify_user);
             } else if event.id == uninstall_firefox_id {
                 if macos_confirm(
                     "Uninstall Firefox?",

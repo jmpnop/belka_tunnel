@@ -139,48 +139,127 @@ fn find_firefox_binary(bundle: &Path) -> Option<PathBuf> {
 
 // ---------- Install / Uninstall ----------
 
-/// Kick off `brew install --cask --force firefox` (upgrades if already
-/// installed). Runs in a background thread; returns immediately. Emits macOS
-/// notifications on start, success, and failure.
+/// Direct DMG install: download Firefox from Mozilla, mount, copy
+/// `Firefox.app` into `/Applications`, eject, clean up. No browser, no
+/// Homebrew, no Terminal. Runs in a background thread; returns immediately.
+/// Emits macOS notifications at each step.
 pub fn install_or_update_async(notify: impl Fn(&str, &str) + Send + 'static) -> Result<()> {
-    let brew = locate_brew().ok_or_else(|| {
-        anyhow!(
-            "Homebrew not found. Install it from https://brew.sh, \
-             or download Firefox manually from https://www.mozilla.org/firefox/"
-        )
-    })?;
-    info!(brew = %brew.display(), "starting Firefox install/upgrade");
+    info!("starting direct Firefox install");
     notify(
-        "Installing Firefox via Homebrew",
-        "This may take a couple of minutes. You'll get a notification when it's done.",
+        "Downloading Firefox",
+        "~150 MB from download.mozilla.org. You'll get a notification when it's done.",
     );
     std::thread::spawn(move || {
-        let out = std::process::Command::new(&brew)
-            .args(["install", "--cask", "--force", "firefox"])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                info!("Firefox install/upgrade succeeded");
-                notify("Firefox is ready", "Installed via Homebrew.");
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
-                warn!(stderr = %stderr, "brew install failed");
-                notify(
-                    "Firefox install failed",
-                    &format!(
-                        "brew install --cask firefox returned non-zero. \
-                         Tail of stderr:\n{}",
-                        stderr.lines().rev().take(6).collect::<Vec<_>>().join("\n")
-                    ),
-                );
-            }
-            Err(e) => {
-                warn!(error = %e, "brew install could not start");
-                notify("Firefox install failed", &format!("{e}"));
-            }
+        if let Err(e) = install_firefox_direct() {
+            warn!(error = %e, "Firefox install failed");
+            notify("Firefox install failed", &format!("{e}"));
+        } else {
+            info!("Firefox install succeeded");
+            notify(
+                "Firefox is ready",
+                "Installed to /Applications. Restart БелкаТуннель to refresh the menu.",
+            );
         }
     });
+    Ok(())
+}
+
+fn install_firefox_direct() -> Result<()> {
+    let tmp_dmg = std::env::temp_dir().join("belka-firefox.dmg");
+    let _ = std::fs::remove_file(&tmp_dmg);
+
+    // Mozilla's stable redirector — picks the right architecture automatically.
+    let url = "https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US";
+    let dl = std::process::Command::new("/usr/bin/curl")
+        .args(["-fL", "--silent", "--show-error", "-o"])
+        .arg(&tmp_dmg)
+        .arg(url)
+        .output()
+        .context("spawn curl for Firefox DMG")?;
+    if !dl.status.success() {
+        let stderr = String::from_utf8_lossy(&dl.stderr).into_owned();
+        bail!("download failed: {}", stderr.trim());
+    }
+
+    // Mount the DMG read-only, no Finder window. `-noverify` skips the
+    // checksum output which would otherwise be interleaved with the device
+    // table on stdout, making parsing fragile.
+    let mount_out = std::process::Command::new("/usr/bin/hdiutil")
+        .args(["attach", "-nobrowse", "-readonly", "-noverify"])
+        .arg(&tmp_dmg)
+        .output()
+        .context("spawn hdiutil attach")?;
+    if !mount_out.status.success() {
+        let _ = std::fs::remove_file(&tmp_dmg);
+        bail!(
+            "hdiutil attach failed: {}",
+            String::from_utf8_lossy(&mount_out.stderr).trim()
+        );
+    }
+    // Parse the mount point — last field of the line containing /Volumes/.
+    let stdout = String::from_utf8_lossy(&mount_out.stdout);
+    let mount_point = stdout
+        .lines()
+        .filter_map(|l| {
+            l.split('\t').last().map(str::trim).filter(|p| {
+                p.starts_with("/Volumes/")
+            })
+        })
+        .next()
+        .ok_or_else(|| anyhow!("could not parse mount point from hdiutil"))?
+        .to_string();
+    info!(mount = %mount_point, "DMG mounted");
+
+    let src = PathBuf::from(&mount_point).join("Firefox.app");
+    if !src.exists() {
+        let _ = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-quiet"])
+            .arg(&mount_point)
+            .status();
+        let _ = std::fs::remove_file(&tmp_dmg);
+        bail!("Firefox.app missing inside DMG at {}", src.display());
+    }
+
+    // Replace any existing /Applications/Firefox.app.
+    let target_root = PathBuf::from("/Applications");
+    let target = target_root.join("Firefox.app");
+    if target.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&target) {
+            // Try to detach before erroring out.
+            let _ = std::process::Command::new("/usr/bin/hdiutil")
+                .args(["detach", "-quiet"])
+                .arg(&mount_point)
+                .status();
+            let _ = std::fs::remove_file(&tmp_dmg);
+            bail!(
+                "couldn't remove existing {}: {} \
+                 (close Firefox first, or copy manually)",
+                target.display(),
+                e
+            );
+        }
+    }
+
+    // ditto preserves resource forks / extended attributes / signatures.
+    let cp = std::process::Command::new("/usr/bin/ditto")
+        .arg(&src)
+        .arg(&target)
+        .status()
+        .context("spawn ditto for Firefox copy")?;
+
+    // Always detach the DMG and remove the download, even if copy failed.
+    let _ = std::process::Command::new("/usr/bin/hdiutil")
+        .args(["detach", "-quiet"])
+        .arg(&mount_point)
+        .status();
+    let _ = std::fs::remove_file(&tmp_dmg);
+
+    if !cp.success() {
+        bail!(
+            "couldn't copy Firefox.app to {}. Permission denied? Try ~/Applications instead.",
+            target_root.display()
+        );
+    }
     Ok(())
 }
 
@@ -259,16 +338,13 @@ pub fn open_download_page() {
 
 // ---------- Homebrew bootstrap ----------
 
-/// Open Terminal.app with the official Homebrew install command, then poll in
-/// the background until the `brew` binary appears (or the user cancels). When
-/// `then_install_firefox` is true, immediately runs Firefox install once brew
-/// is detected. Notifications keep the user informed.
-pub fn install_homebrew_async(
-    then_install_firefox: bool,
-    notify: impl Fn(&str, &str) + Send + Clone + 'static,
-) {
-    // The official install script. Run inside a fresh Terminal window so the
-    // user can see progress and enter their sudo password.
+/// Install Homebrew via the canonical one-liner. Opens Terminal.app so the
+/// user can see the install progress and respond to the sudo prompt
+/// (Homebrew's install script refuses to run as root, so we can't bypass
+/// Terminal cleanly). Background-polls for `brew` to appear and notifies
+/// when it's ready.
+pub fn install_homebrew_async(notify: impl Fn(&str, &str) + Send + 'static) {
+    // The official install command, as documented on https://brew.sh.
     let install_cmd = r#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#;
     let osascript = format!(
         r#"tell application "Terminal"
@@ -285,68 +361,36 @@ end tell"#,
         warn!(error = %e, "could not open Terminal for Homebrew install");
         notify(
             "Couldn't open Terminal",
-            "Open Terminal manually and run the install command from https://brew.sh",
+            "Run this in Terminal manually:\n\
+             /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"",
         );
         return;
     }
 
     notify(
         "Installing Homebrew",
-        "Terminal is open — enter your password when prompted. \
-         You'll get another notification when Homebrew is ready.",
+        "Terminal opened with the standard install one-liner. \
+         You'll get another notification once brew is ready.",
     );
 
-    let notify_for_thread = notify.clone();
     std::thread::spawn(move || {
-        // Poll every 5s for up to 30 minutes for the brew binary to appear.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(5));
             if let Some(brew) = locate_brew() {
                 info!(brew = %brew.display(), "Homebrew install detected");
-                notify_for_thread(
+                notify(
                     "Homebrew installed",
-                    if then_install_firefox {
-                        "Now installing Firefox via Homebrew…"
-                    } else {
-                        "Ready to use. Restart БелкаТуннель to refresh the menu."
-                    },
+                    "Ready to use. Restart БелкаТуннель to refresh the menu.",
                 );
-                if then_install_firefox {
-                    let out = std::process::Command::new(&brew)
-                        .args(["install", "--cask", "--force", "firefox"])
-                        .output();
-                    match out {
-                        Ok(o) if o.status.success() => notify_for_thread(
-                            "Firefox is ready",
-                            "Installed via Homebrew. Restart БелкаТуннель to enable the 'Open a private window' item.",
-                        ),
-                        Ok(o) => notify_for_thread(
-                            "Firefox install failed",
-                            &format!(
-                                "brew install returned non-zero:\n{}",
-                                String::from_utf8_lossy(&o.stderr)
-                                    .lines()
-                                    .rev()
-                                    .take(6)
-                                    .collect::<Vec<_>>()
-                                    .join("\n")
-                            ),
-                        ),
-                        Err(e) => notify_for_thread(
-                            "Firefox install failed",
-                            &format!("{e}"),
-                        ),
-                    }
-                }
                 return;
             }
             if std::time::Instant::now() >= deadline {
-                warn!("Homebrew install poll timed out after 30 min");
-                notify_for_thread(
+                warn!("Homebrew install poll timed out");
+                notify(
                     "Homebrew install timed out",
                     "Couldn't detect brew after 30 minutes. \
-                     If you completed the install, restart БелкаТуннель and try again.",
+                     Run the install manually in Terminal if needed.",
                 );
                 return;
             }
