@@ -432,12 +432,6 @@ pub fn uninstall_async(notify: impl Fn(&str, &str) + Send + 'static) -> Result<(
     Ok(())
 }
 
-pub fn open_download_page() {
-    let _ = std::process::Command::new("/usr/bin/open")
-        .arg("https://www.mozilla.org/firefox/new/")
-        .spawn();
-}
-
 // ---------- Homebrew bootstrap ----------
 
 /// Install Homebrew via the canonical one-liner. Opens Terminal.app so the

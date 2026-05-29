@@ -186,8 +186,6 @@ fn main() -> Result<()> {
         firefox_info.installed(),
         None,
     );
-    let firefox_download_item =
-        MenuItem::new("Open Mozilla download page in browser", true, None);
 
     firefox_submenu.append(&open_firefox_item)?;
     firefox_submenu.append(&PredefinedMenuItem::separator())?;
@@ -196,8 +194,6 @@ fn main() -> Result<()> {
         firefox_submenu.append(&install_homebrew_item)?;
     }
     firefox_submenu.append(&uninstall_firefox_item)?;
-    firefox_submenu.append(&PredefinedMenuItem::separator())?;
-    firefox_submenu.append(&firefox_download_item)?;
     let edit_config_item = MenuItem::new("Edit Configuration…", true, None);
     let reveal_data_item = MenuItem::new("Reveal Data Folder in Finder", true, None);
     let open_logs_item = MenuItem::new("Open Log File", true, None);
@@ -265,7 +261,6 @@ fn main() -> Result<()> {
     let install_firefox_id = install_firefox_item.id().clone();
     let install_homebrew_id = install_homebrew_item.id().clone();
     let uninstall_firefox_id = uninstall_firefox_item.id().clone();
-    let firefox_download_id = firefox_download_item.id().clone();
     let mut hide_status_dot = file.hide_status_dot;
     let socks_host_for_firefox = if profile.socks.listen_addr == "0.0.0.0" {
         "127.0.0.1".to_string()
@@ -337,8 +332,6 @@ fn main() -> Result<()> {
                         macos_alert("Couldn't uninstall Firefox", &format!("{e}"));
                     }
                 }
-            } else if event.id == firefox_download_id {
-                firefox::open_download_page();
             } else if event.id == edit_config_id {
                 spawn_gui();
             } else if event.id == reveal_data_id {
