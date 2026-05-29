@@ -212,7 +212,6 @@ icon_locations = {{
     appname:        {APP_ICON_POS!r},
     "Applications": {APPLICATIONS_ICON_POS!r},
 }}
-# darkened background image.
 
 default_view = "icon-view"
 show_status_bar = False
