@@ -10,6 +10,7 @@ dependencies = [
     "psutil>=5.9",
     "dmgbuild>=1.6",
     "pillow>=12.2.0",
+    "pyobjc>=12.1",
 ]
 
 [project.scripts]

@@ -116,9 +116,34 @@ arrange_by = None
     finally:
         settings_path.unlink(missing_ok=True)
 
+    _set_file_icon(out, icon)
     size_mb = out.stat().st_size / 1024 / 1024
     util.ok(f"installer ready: {out} ({size_mb:.1f} MB)")
     return out
+
+
+def _set_file_icon(target: Path, icon_path: Path) -> None:
+    """Set the macOS Finder icon on `target` from an .icns file.
+
+    dmgbuild's own `icon = ...` setting silently no-ops in our environment
+    (the resource fork stays empty), so we set it directly via NSWorkspace.
+    Confirmed via `xattr -l <dmg>` showing com.apple.ResourceFork after this
+    call but not before.
+    """
+    try:
+        from AppKit import NSImage, NSWorkspace
+    except ImportError:
+        util.warn(
+            "PyObjC not available; DMG file icon not set "
+            "(`uv add pyobjc` in tools/)"
+        )
+        return
+    img = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
+    ok = NSWorkspace.sharedWorkspace().setIcon_forFile_options_(
+        img, str(target), 0
+    )
+    if not ok:
+        util.warn(f"NSWorkspace.setIcon returned False for {target}")
 
 
 def pfusers_cargo_version() -> str:
@@ -207,6 +232,8 @@ arrange_by = None
         settings_path.unlink(missing_ok=True)
     _ = PFUSERS_DIR  # silence unused; useful when we add asset paths later
 
+    if icon_path.exists():
+        _set_file_icon(out, icon_path)
     size_mb = out.stat().st_size / 1024 / 1024
     util.ok(f"installer ready: {out} ({size_mb:.1f} MB)")
     return out
