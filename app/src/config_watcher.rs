@@ -173,6 +173,35 @@ mod tests {
     }
 
     #[test]
+    fn atomic_rename_save_triggers_callback() {
+        // ConfigFile::save now writes to a sibling .tmp file and renames
+        // onto the target — this test makes sure the watcher fires for
+        // that pattern, not just for in-place truncate-writes (which
+        // write_triggers_callback covers separately).
+        let dir = tempdir().unwrap();
+        let cfg = dir.path().join("config.json");
+        std::fs::write(&cfg, "{}").unwrap();
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_w = count.clone();
+        let _watcher = spawn(&cfg, move || {
+            count_w.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Same atomic-rename shape that ConfigFile::save uses:
+        let tmp = dir.path().join(".config.json.tmp.12345");
+        std::fs::write(&tmp, r#"{"new":1}"#).unwrap();
+        std::fs::rename(&tmp, &cfg).unwrap();
+
+        assert!(
+            wait_until(Duration::from_secs(2), || count.load(Ordering::SeqCst) >= 1),
+            "watcher did not fire on atomic-rename save",
+        );
+    }
+
+    #[test]
     fn unrelated_file_changes_are_ignored() {
         // Files in the watched parent dir that aren't the target should not
         // fire the callback — otherwise an editor saving a sibling .swp or
