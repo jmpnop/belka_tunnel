@@ -7,7 +7,7 @@ use russh::ChannelMsg;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -229,49 +229,75 @@ pub async fn open_channel(
     Ok(channel)
 }
 
-/// Bridge a TCP stream with an SSH channel until either side closes.
+/// Bridge a TCP stream with an SSH `direct-tcpip` channel **with proper
+/// half-close**. Either side can end its half independently; we keep
+/// pumping the other direction until it also finishes, instead of dropping
+/// in-flight bytes the moment the first end-of-stream arrives.
+///
+/// The 64 KiB buffer is a known sweet spot for tunneled-TCP throughput.
 pub async fn bridge<S>(mut tcp: S, mut channel: russh::Channel<russh::client::Msg>) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut buf = vec![0u8; 32 * 1024];
-    loop {
+    let mut buf = vec![0u8; 64 * 1024];
+    // tcp_done = no more bytes will move TCP→SSH ; chan_done = no more bytes will move SSH→TCP.
+    let mut tcp_done = false;
+    let mut chan_done = false;
+
+    while !(tcp_done && chan_done) {
         tokio::select! {
-            // TCP -> SSH channel
-            r = tcp.read(&mut buf) => {
+            // TCP → SSH channel — only polled while TCP read half is alive.
+            r = tcp.read(&mut buf), if !tcp_done => {
                 match r {
                     Ok(0) => {
-                        // EOF on TCP side; signal EOF on channel
+                        // Client closed its write half. Signal EOF to the SSH
+                        // channel and stop reading TCP, but KEEP draining the
+                        // channel — the server may still send a final HTTP
+                        // response chunk after seeing the client's FIN.
                         let _ = channel.eof().await;
-                        break;
+                        tcp_done = true;
                     }
                     Ok(n) => {
                         if let Err(e) = channel.data(&buf[..n]).await {
-                            return Err(anyhow!("channel data: {e}"));
+                            warn!(error = %e, "SSH channel write failed; tearing bridge down");
+                            tcp_done = true;
+                            chan_done = true;
                         }
                     }
-                    Err(e) => return Err(anyhow!("tcp read: {e}")),
+                    Err(e) => {
+                        debug!(error = %e, "TCP read error");
+                        tcp_done = true;
+                        let _ = channel.eof().await;
+                    }
                 }
             }
-            // SSH channel -> TCP
-            msg = channel.wait() => {
+            // SSH channel → TCP — only polled while SSH side is alive.
+            msg = channel.wait(), if !chan_done => {
                 match msg {
                     Some(ChannelMsg::Data { data }) => {
                         if let Err(e) = tcp.write_all(&data).await {
-                            return Err(anyhow!("tcp write: {e}"));
+                            debug!(error = %e, "TCP write failed; tearing bridge down");
+                            chan_done = true;
+                            tcp_done = true;
                         }
                     }
                     Some(ChannelMsg::ExtendedData { .. }) => {
                         // ignore stderr-equivalent
                     }
-                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) => break,
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                        // Server signalled end. Half-close the TCP write side
+                        // but KEEP reading TCP — client may still send a final
+                        // request body or RST that we want to observe.
+                        let _ = tcp.shutdown().await;
+                        chan_done = true;
+                    }
                     Some(_) => {}
-                    None => break,
                 }
             }
         }
     }
+
     let _ = tcp.shutdown().await;
     Ok(())
 }

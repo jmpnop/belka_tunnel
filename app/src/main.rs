@@ -506,36 +506,43 @@ fn init_tracing() {
 /// human-readable `host:port` strings clients can use to reach the proxy.
 /// Skips noisy stuff: IPv6 link-local (fe80::), AWDL/utun/anpi pseudo-interfaces.
 fn collect_endpoints(listen_addr: &str, port: u16) -> Vec<String> {
+    let ifaces = local_ip_address::list_afinet_netifas().unwrap_or_default();
+    collect_endpoints_from(listen_addr, port, ifaces)
+}
+
+/// Pure filtering logic — accepts an iterator of `(interface_name, IpAddr)`
+/// so it can be unit-tested without depending on the actual system interface
+/// list. See `tests::collect_endpoints_*`.
+fn collect_endpoints_from(
+    listen_addr: &str,
+    port: u16,
+    ifaces: impl IntoIterator<Item = (String, std::net::IpAddr)>,
+) -> Vec<String> {
     if listen_addr != "0.0.0.0" && listen_addr != "::" {
         return vec![format!("{listen_addr}:{port}")];
     }
     let mut out: Vec<String> = vec![format!("127.0.0.1:{port}  (loopback)")];
-    if let Ok(ifaces) = local_ip_address::list_afinet_netifas() {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        seen.insert("127.0.0.1".to_string());
-        for (name, ip) in ifaces {
-            if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-                continue;
-            }
-            // Filter out junk interfaces / link-local addresses.
-            let lower_name = name.to_lowercase();
-            if matches!(
-                lower_name.as_str(),
-                _ if lower_name.starts_with("utun")
-                    || lower_name.starts_with("awdl")
-                    || lower_name.starts_with("llw")
-                    || lower_name.starts_with("anpi")
-                    || lower_name.starts_with("ap")
-                    || lower_name.starts_with("bridge")
-            ) {
-                continue;
-            }
-            // IPv4 only — IPv6 endpoints are noise for this use case.
-            if let std::net::IpAddr::V4(v) = ip {
-                let key = v.to_string();
-                if seen.insert(key) {
-                    out.push(format!("{v}:{port}  ({name})"));
-                }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert("127.0.0.1".to_string());
+    for (name, ip) in ifaces {
+        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+            continue;
+        }
+        let lower_name = name.to_lowercase();
+        if lower_name.starts_with("utun")
+            || lower_name.starts_with("awdl")
+            || lower_name.starts_with("llw")
+            || lower_name.starts_with("anpi")
+            || lower_name.starts_with("ap")
+            || lower_name.starts_with("bridge")
+        {
+            continue;
+        }
+        // IPv4 only — IPv6 endpoints are noise for this use case.
+        if let std::net::IpAddr::V4(v) = ip {
+            let key = v.to_string();
+            if seen.insert(key) {
+                out.push(format!("{v}:{port}  ({name})"));
             }
         }
     }
@@ -716,3 +723,115 @@ fn relaunch_self() {
 // callsites that depend on its construction visibility.
 #[allow(dead_code)]
 fn _profile_marker(_: &Profile) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv6Addr};
+
+    fn v4(s: &str) -> IpAddr {
+        IpAddr::V4(s.parse().unwrap())
+    }
+    fn v6(s: &str) -> IpAddr {
+        IpAddr::V6(s.parse::<Ipv6Addr>().unwrap())
+    }
+
+    #[test]
+    fn specific_addr_returns_single_entry_unchanged() {
+        let r = collect_endpoints_from(
+            "192.168.1.5",
+            1080,
+            vec![("en0".to_string(), v4("1.2.3.4"))],
+        );
+        assert_eq!(r, vec!["192.168.1.5:1080".to_string()]);
+    }
+
+    #[test]
+    fn loopback_first_when_listening_on_all() {
+        let r = collect_endpoints_from("0.0.0.0", 1081, std::iter::empty());
+        assert_eq!(r, vec!["127.0.0.1:1081  (loopback)".to_string()]);
+    }
+
+    #[test]
+    fn filters_pseudo_interfaces() {
+        let r = collect_endpoints_from(
+            "0.0.0.0",
+            1080,
+            vec![
+                ("utun0".to_string(), v4("10.0.0.1")),
+                ("awdl0".to_string(), v4("10.0.0.2")),
+                ("anpi0".to_string(), v4("10.0.0.3")),
+                ("ap1".to_string(), v4("10.0.0.4")),
+                ("bridge100".to_string(), v4("10.0.0.5")),
+                ("llw0".to_string(), v4("10.0.0.6")),
+                ("en0".to_string(), v4("192.168.1.100")),
+            ],
+        );
+        assert_eq!(
+            r,
+            vec![
+                "127.0.0.1:1080  (loopback)".to_string(),
+                "192.168.1.100:1080  (en0)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn drops_loopback_unspecified_multicast() {
+        let r = collect_endpoints_from(
+            "0.0.0.0",
+            1080,
+            vec![
+                ("lo0".to_string(), v4("127.0.0.1")),
+                ("en0".to_string(), v4("0.0.0.0")),
+                ("en1".to_string(), v4("224.0.0.1")),
+                ("en2".to_string(), v4("192.168.0.50")),
+            ],
+        );
+        assert_eq!(
+            r,
+            vec![
+                "127.0.0.1:1080  (loopback)".to_string(),
+                "192.168.0.50:1080  (en2)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ipv6_addresses_excluded() {
+        let r = collect_endpoints_from(
+            "0.0.0.0",
+            1080,
+            vec![
+                ("en0".to_string(), v6("2001:db8::1")),
+                ("en0".to_string(), v4("10.0.0.5")),
+            ],
+        );
+        assert_eq!(
+            r,
+            vec![
+                "127.0.0.1:1080  (loopback)".to_string(),
+                "10.0.0.5:1080  (en0)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn deduplicates_repeated_ipv4() {
+        let r = collect_endpoints_from(
+            "0.0.0.0",
+            1080,
+            vec![
+                ("en0".to_string(), v4("10.0.0.5")),
+                ("en1".to_string(), v4("10.0.0.5")),
+            ],
+        );
+        assert_eq!(
+            r,
+            vec![
+                "127.0.0.1:1080  (loopback)".to_string(),
+                "10.0.0.5:1080  (en0)".to_string(),
+            ]
+        );
+    }
+}

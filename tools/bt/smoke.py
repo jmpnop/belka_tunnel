@@ -68,7 +68,9 @@ def smoke(socks_port: int = SOCKS_PORT_DEFAULT) -> None:
     try:
         # httpx removed the `proxies=` parameter in 0.28; `proxy=` is the
         # current form and works back to 0.26.
-        r = httpx.get("https://ifconfig.me", timeout=10, proxy=proxy)
+        # ifconfig.me returns HTML to python-httpx by default; /ip is the
+        # always-plain-text path.
+        r = httpx.get("https://ifconfig.me/ip", timeout=10, proxy=proxy)
     except Exception as e:
         util.fail(f"tunnel request failed: {e}")
         raise SystemExit(1)
