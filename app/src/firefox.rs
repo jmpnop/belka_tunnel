@@ -276,15 +276,83 @@ pub fn install_firefox_policies(
     Ok(policies_path)
 }
 
+/// RAII handle for a mounted DMG: ejects the volume on drop. Replaces the
+/// hand-written `let _ = hdiutil detach…` sprinkled through every error path
+/// of install_firefox_direct — a panic between attach and the final detach
+/// would otherwise leak a `/Volumes/Firefox` mount point until the user
+/// hard-ejects in Finder.
+struct DmgMount {
+    mount_point: String,
+}
+
+impl DmgMount {
+    fn attach(dmg: &std::path::Path) -> Result<Self> {
+        // `-noverify` skips the checksum output which would otherwise be
+        // interleaved with the device table on stdout, making the trailing
+        // `/Volumes/...` field harder to extract reliably.
+        let out = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["attach", "-nobrowse", "-readonly", "-noverify"])
+            .arg(dmg)
+            .output()
+            .context("spawn hdiutil attach")?;
+        if !out.status.success() {
+            bail!(
+                "hdiutil attach failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        // Parse the mount point — last tab-separated field of the line
+        // containing /Volumes/.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mount_point = stdout
+            .lines()
+            .filter_map(|l| {
+                l.split('\t')
+                    .next_back()
+                    .map(str::trim)
+                    .filter(|p| p.starts_with("/Volumes/"))
+            })
+            .next()
+            .ok_or_else(|| anyhow!("could not parse mount point from hdiutil"))?
+            .to_string();
+        info!(mount = %mount_point, "DMG mounted");
+        Ok(Self { mount_point })
+    }
+
+    fn path(&self) -> &str {
+        &self.mount_point
+    }
+}
+
+impl Drop for DmgMount {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-quiet"])
+            .arg(&self.mount_point)
+            .status();
+    }
+}
+
+/// Same idea for the downloaded `.dmg` itself — delete the temp file on drop
+/// so cancelled installs (panic, early bail) don't leave ~80 MB sitting in
+/// /tmp until the OS sweeps it.
+struct TempFile(std::path::PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 fn install_firefox_direct() -> Result<()> {
-    let tmp_dmg = std::env::temp_dir().join("belka-firefox.dmg");
-    let _ = std::fs::remove_file(&tmp_dmg);
+    let tmp_dmg = TempFile(std::env::temp_dir().join("belka-firefox.dmg"));
+    let _ = std::fs::remove_file(&tmp_dmg.0);
 
     // Mozilla's stable redirector — picks the right architecture automatically.
     let url = "https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US";
     let dl = std::process::Command::new("/usr/bin/curl")
         .args(["-fL", "--silent", "--show-error", "-o"])
-        .arg(&tmp_dmg)
+        .arg(&tmp_dmg.0)
         .arg(url)
         .output()
         .context("spawn curl for Firefox DMG")?;
@@ -293,43 +361,10 @@ fn install_firefox_direct() -> Result<()> {
         bail!("download failed: {}", stderr.trim());
     }
 
-    // Mount the DMG read-only, no Finder window. `-noverify` skips the
-    // checksum output which would otherwise be interleaved with the device
-    // table on stdout, making parsing fragile.
-    let mount_out = std::process::Command::new("/usr/bin/hdiutil")
-        .args(["attach", "-nobrowse", "-readonly", "-noverify"])
-        .arg(&tmp_dmg)
-        .output()
-        .context("spawn hdiutil attach")?;
-    if !mount_out.status.success() {
-        let _ = std::fs::remove_file(&tmp_dmg);
-        bail!(
-            "hdiutil attach failed: {}",
-            String::from_utf8_lossy(&mount_out.stderr).trim()
-        );
-    }
-    // Parse the mount point — last field of the line containing /Volumes/.
-    let stdout = String::from_utf8_lossy(&mount_out.stdout);
-    let mount_point = stdout
-        .lines()
-        .filter_map(|l| {
-            l.split('\t')
-                .next_back()
-                .map(str::trim)
-                .filter(|p| p.starts_with("/Volumes/"))
-        })
-        .next()
-        .ok_or_else(|| anyhow!("could not parse mount point from hdiutil"))?
-        .to_string();
-    info!(mount = %mount_point, "DMG mounted");
+    let mount = DmgMount::attach(&tmp_dmg.0)?;
 
-    let src = PathBuf::from(&mount_point).join("Firefox.app");
+    let src = PathBuf::from(mount.path()).join("Firefox.app");
     if !src.exists() {
-        let _ = std::process::Command::new("/usr/bin/hdiutil")
-            .args(["detach", "-quiet"])
-            .arg(&mount_point)
-            .status();
-        let _ = std::fs::remove_file(&tmp_dmg);
         bail!("Firefox.app missing inside DMG at {}", src.display());
     }
 
@@ -337,20 +372,12 @@ fn install_firefox_direct() -> Result<()> {
     let target_root = PathBuf::from("/Applications");
     let target = target_root.join("Firefox.app");
     if target.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&target) {
-            // Try to detach before erroring out.
-            let _ = std::process::Command::new("/usr/bin/hdiutil")
-                .args(["detach", "-quiet"])
-                .arg(&mount_point)
-                .status();
-            let _ = std::fs::remove_file(&tmp_dmg);
-            bail!(
-                "couldn't remove existing {}: {} \
-                 (close Firefox first, or copy manually)",
-                target.display(),
-                e
-            );
-        }
+        std::fs::remove_dir_all(&target).with_context(|| {
+            format!(
+                "removing existing {} — close Firefox first, or copy manually",
+                target.display()
+            )
+        })?;
     }
 
     // ditto preserves resource forks / extended attributes / signatures.
@@ -360,19 +387,13 @@ fn install_firefox_direct() -> Result<()> {
         .status()
         .context("spawn ditto for Firefox copy")?;
 
-    // Always detach the DMG and remove the download, even if copy failed.
-    let _ = std::process::Command::new("/usr/bin/hdiutil")
-        .args(["detach", "-quiet"])
-        .arg(&mount_point)
-        .status();
-    let _ = std::fs::remove_file(&tmp_dmg);
-
     if !cp.success() {
         bail!(
             "couldn't copy Firefox.app to {}. Permission denied? Try ~/Applications instead.",
             target_root.display()
         );
     }
+    // `mount` and `tmp_dmg` clean up on drop.
     Ok(())
 }
 
