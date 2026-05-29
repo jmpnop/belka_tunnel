@@ -96,12 +96,29 @@ impl ConfigFile {
             Some(p) => p,
             None => return Ok(Self::default()),
         };
-        if path.exists() {
-            Self::load(&path)
-        } else {
+        if !path.exists() {
             let cfg = Self::default();
             cfg.save(&path).ok();
-            Ok(cfg)
+            return Ok(cfg);
+        }
+        // File exists. If it parses + validates, use it. If it doesn't —
+        // corrupt JSON from a partial save, a hand-edit gone wrong, a
+        // pathological backoff value — fall back to defaults instead of
+        // bailing out of main(). The whole point of this app is to be a
+        // persistent menu-bar daemon; if a stray comma in config.json
+        // crashed startup the user couldn't even open the GUI editor to
+        // recover. The original file is left intact so the user can fix
+        // it manually; the GUI just won't read it until they do.
+        match Self::load(&path) {
+            Ok(cfg) => Ok(cfg),
+            Err(e) => {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %format!("{e:#}"),
+                    "config failed to load — using defaults; original file untouched"
+                );
+                Ok(Self::default())
+            }
         }
     }
 
@@ -292,6 +309,27 @@ mod tests {
                 "multiplier {m} got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn load_or_default_falls_back_on_corrupt_file() {
+        // load_or_default must NOT bail when config.json is malformed —
+        // doing so used to crash main() and lock the user out of the GUI
+        // editor that could fix it. Verify by writing a broken file at a
+        // tempdir and asserting that load() errors but the original is
+        // still on disk afterward (so user-recovery is possible).
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        std::fs::write(&path, "{ broken json: ").unwrap();
+        let load_err = ConfigFile::load(&path);
+        assert!(load_err.is_err(), "broken JSON should fail load");
+        // Original file should still be there for the user to inspect.
+        assert!(path.exists(), "load() must not delete the bad file");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            body, "{ broken json: ",
+            "load() must not rewrite the bad file"
+        );
     }
 
     /// Old configs may still carry the old `hide_status_dot` field — serde's
