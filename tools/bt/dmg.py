@@ -47,10 +47,14 @@ def build_dmg() -> Path:
         raise SystemExit(1)
 
     version = cargo_version()
-    out = bundle.parent / f"BelkaTunnel-{version}.dmg"
-    if out.exists():
-        out.unlink()
-    util.step(f"building DMG → {out.name}")
+    # dmgbuild always appends `.dmg` to its output filename. We build there
+    # and then rename to the requested `.img` extension.
+    intermediate = bundle.parent / f"BelkaTunnel-{version}.dmg"
+    out = bundle.parent / f"BelkaTunnel-{version}.img"
+    for p in (intermediate, out):
+        if p.exists():
+            p.unlink()
+    util.step(f"building installer → {out.name}")
 
     # dmgbuild reads a Python "settings file" with module-level assignments.
     # We generate one in a temp dir so the build is reproducible from CI without
@@ -100,15 +104,16 @@ arrange_by = None
         import dmgbuild
 
         dmgbuild.build_dmg(
-            filename=str(out),
+            filename=str(intermediate),
             volume_name="БелкаТуннель",
             settings_file=str(settings_path),
         )
     finally:
         settings_path.unlink(missing_ok=True)
 
+    intermediate.rename(out)
     size_mb = out.stat().st_size / 1024 / 1024
-    util.ok(f"DMG ready: {out} ({size_mb:.1f} MB)")
+    util.ok(f"installer ready: {out} ({size_mb:.1f} MB)")
     return out
 
 
@@ -116,7 +121,7 @@ def verify_dmg() -> None:
     """Sanity-check the latest produced DMG can be mounted and contains the app."""
     util.step("verify DMG")
     version = cargo_version()
-    dmg = util.BUNDLE.parent / f"BelkaTunnel-{version}.dmg"
+    dmg = util.BUNDLE.parent / f"BelkaTunnel-{version}.img"
     if not dmg.exists():
         util.fail(f"missing {dmg} — run `bt dmg` first")
         raise SystemExit(1)

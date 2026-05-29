@@ -6,7 +6,7 @@ import sys
 
 import typer
 
-from . import build, dmg, smoke, util, verify
+from . import build, dmg, notarize, smoke, util, verify
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
 
@@ -42,9 +42,15 @@ def cmd_build(
 
 
 @app.command()
-def bundle() -> None:
+def bundle(
+    universal: bool = typer.Option(
+        False,
+        "--universal",
+        help="Consume target/universal/release/proxy-tunnel (run `bt universal` first)",
+    ),
+) -> None:
     """Build release + assemble dist/BelkaTunnel.app."""
-    build.bundle()
+    build.bundle(universal=universal)
 
 
 @app.command()
@@ -117,6 +123,29 @@ def verify_dmg() -> None:
 def cmd_dmg() -> None:
     """Build dist/BelkaTunnel-<version>.dmg (uses dmgbuild + the voxel-tree bg)."""
     dmg.build_dmg()
+
+
+@app.command(name="notarize")
+def cmd_notarize() -> None:
+    """Sign + notarize + staple the latest DMG. Needs SIGN_IDENTITY + NOTARY_PROFILE env."""
+    notarize.cmd_notarize()
+
+
+@app.command(name="release")
+def cmd_release() -> None:
+    """Full release pipeline: universal → bundle → verify → dmg → notarize.
+
+    Requires SIGN_IDENTITY and NOTARY_PROFILE env. Produces a signed +
+    notarized + stapled DMG ready for distribution.
+    """
+    util.step("release pipeline")
+    build.build_universal()
+    build.bundle(universal=True)
+    verify.verify_bundle()
+    verify.verify_policies()
+    dmg.build_dmg()
+    notarize.cmd_notarize()
+    util.ok("release artifact ready")
 
 
 # ---------- Smoke / bench ----------

@@ -41,10 +41,19 @@ def cargo_test() -> None:
     util.run(["cargo", "test", "--release"], cwd=util.APP_DIR)
 
 
-def bundle() -> None:
-    """Build release + assemble dist/BelkaTunnel.app."""
-    cargo_build(release=True)
-    util.run(["bash", "./build-app.sh"], cwd=util.APP_DIR)
+def bundle(universal: bool = False) -> None:
+    """Build release + assemble dist/BelkaTunnel.app.
+
+    When `universal=True`, expects `bt universal` to have produced a fat
+    binary at target/universal/release/proxy-tunnel and consumes it directly
+    instead of running another `cargo build --release`.
+    """
+    env: dict[str, str] = {}
+    if universal:
+        env["USE_UNIVERSAL"] = "1"
+    else:
+        cargo_build(release=True)
+    util.run(["bash", "./build-app.sh"], cwd=util.APP_DIR, env=env)
     util.ok(f"bundle ready at {util.BUNDLE}")
 
 
