@@ -1229,20 +1229,53 @@ impl App {
                 field(
                     ui,
                     "Private key",
-                    Some("Defaults to ~/.ssh/id_ed25519"),
+                    Some("Defaults to ~/.ssh/id_ed25519. Browse to pick a different key."),
                     |ui| {
-                        let mut p = self
-                            .settings_form
-                            .ssh
-                            .key_path
-                            .to_string_lossy()
-                            .into_owned();
-                        if ui
-                            .add(egui::TextEdit::singleline(&mut p).desired_width(f32::INFINITY))
-                            .changed()
-                        {
-                            self.settings_form.ssh.key_path = std::path::PathBuf::from(p);
-                        }
+                        ui.horizontal(|ui| {
+                            let mut p = self
+                                .settings_form
+                                .ssh
+                                .key_path
+                                .to_string_lossy()
+                                .into_owned();
+                            // Fixed width matches the fingerprint row below so
+                            // the modal layout stays clamped (see the comment
+                            // in this method about width-arithmetic feedback
+                            // loops).
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut p)
+                                        .desired_width(330.0)
+                                        .hint_text("~/.ssh/id_ed25519"),
+                                )
+                                .changed()
+                            {
+                                self.settings_form.ssh.key_path = std::path::PathBuf::from(p);
+                            }
+                            if ghost_button(ui, "  Browse…  ").clicked() {
+                                // Start the picker in the current key's parent
+                                // dir if it exists, else ~/.ssh — saves the
+                                // user from navigating from / on every open.
+                                let start = self
+                                    .settings_form
+                                    .ssh
+                                    .key_path
+                                    .parent()
+                                    .filter(|p| p.is_dir())
+                                    .map(|p| p.to_path_buf())
+                                    .unwrap_or_else(|| {
+                                        std::path::PathBuf::from(
+                                            std::env::var("HOME").unwrap_or_default(),
+                                        )
+                                        .join(".ssh")
+                                    });
+                                if let Some(picked) =
+                                    rfd::FileDialog::new().set_directory(start).pick_file()
+                                {
+                                    self.settings_form.ssh.key_path = picked;
+                                }
+                            }
+                        });
                     },
                 );
                 field(
