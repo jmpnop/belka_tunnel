@@ -95,6 +95,12 @@ pub async fn run_forever(config: Arc<Config>, status: watch::Sender<Status>, con
             Ok(()) => {
                 info!("SSH session ended cleanly");
                 backoff = Duration::from_secs(config.reconnect.initial_backoff_secs);
+                // Without this, status stays at Connected for the entire
+                // reconnect-backoff sleep below — the menu line would lie
+                // for up to `initial_backoff_secs` after every clean end.
+                if control.is_enabled() {
+                    let _ = status.send(Status::Disconnected("session ended".into()));
+                }
             }
             Err(e) => {
                 let msg = format!("{e:#}");
