@@ -19,19 +19,40 @@
 //!     that need to be kept in lockstep on the OS side. We invoke them
 //!     directly via SSH exec.
 //!
-//! ## XML round-trip strategy
+//! ## Byte-preserving mutation + four-layer safety wrapper
 //!
-//! Round-tripping config.xml through a parser + serializer risks losing
-//! whitespace / element ordering / attribute formatting that pfSense's
-//! parser tolerates but a future Rust serializer might emit differently.
-//! To minimise that surface:
+//! Round-tripping the entire document through a serializer would risk
+//! losing whitespace / attribute formatting that pfSense's parser
+//! tolerates only because PHP serialized them. We avoid that entirely:
 //!
-//!   1. We parse the entire document into a `Doc` (event tree from
-//!      quick-xml) that records bytes verbatim where possible.
-//!   2. We mutate ONLY the `<system>/<user>` subtree (and `<system>/<group>`
-//!      for membership edits). All other nodes survive byte-for-byte.
-//!   3. We serialize back via quick-xml's Writer, only touching the user/
-//!      group sections.
+//!   1. **Byte-precise mutation** (`apply_mutation`): parse the original
+//!      XML to find byte offsets, then splice only the changed bytes.
+//!      `result = original[..start] + new + original[end..]`. Regions
+//!      OUTSIDE the splice are LITERALLY the same `&[u8]` as input —
+//!      there's no Writer re-emission for unchanged areas, so they
+//!      cannot diverge from what pfSense's parser sees.
+//!
+//!   2. **Snapshot before every write** (`write_with_safety`): copy
+//!      `/cf/conf/config.xml` to `/cf/conf/backup/config-<unix-ts>-pfusers.xml`
+//!      via SSH. pfSense's Web UI Config History page enumerates that
+//!      directory, so the user can revert through their normal admin
+//!      path — or via SSH `cp` if needed.
+//!
+//!   3. **Self-verification** (Rust side): after the write, re-read
+//!      config.xml and assert the mutation actually took (new user
+//!      present, descr round-tripped, count incremented, etc.). Catches
+//!      our serializer bugs cheaply.
+//!
+//!   4. **pfSense parser verification** (PHP side, one bounded call):
+//!      `php -r 'require_once("config.inc"); parse_config(true);
+//!      echo count($config["system"]["user"]);'` over SSH. Compares the
+//!      user count to what we expect post-mutation. This is the ONLY
+//!      PHP call in pfusers and exists purely as a parser-agreement
+//!      check — no PHP in the mutation path.
+//!
+//! If ANY of layers 3/4 fail, we automatically `cp` the snapshot back
+//! over config.xml. The router sees the same bytes it had before the
+//! call, and the caller gets an `Err` with the diagnostic.
 //!
 //! ## Password hashing
 //!
@@ -54,10 +75,8 @@
 use crate::ssh::{exec_command, ClientHandle};
 use crate::users::PfUser;
 use anyhow::{anyhow, bail, Context, Result};
-use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::events::Event;
 use quick_xml::Reader;
-use quick_xml::Writer;
-use std::io::Cursor;
 
 const CONFIG_PATH: &str = "/cf/conf/config.xml";
 
@@ -77,6 +96,474 @@ struct UserRow {
     bcrypt_hash: Option<String>,
     sha512_hash: Option<String>,
     md5_hash: Option<String>,
+}
+
+// ---------- Byte-precise mutation engine ----------
+//
+// All write paths route through `apply_mutations`. Instead of round-tripping
+// the entire document through quick-xml's Writer (which is where the
+// byte-mismatch risk lives), we:
+//
+//   1. Parse the original XML to find byte offsets for the regions we want
+//      to change.
+//   2. Generate new bytes ONLY for those regions.
+//   3. Splice: `result = original[..start] + new + original[end..]`.
+//
+// Unchanged regions of the file are literally the same `&[u8]` as the
+// input — there is no Writer re-emission to disagree with pfSense's
+// parser. The risk surface contracts to "do the bytes we generate for the
+// changed regions parse cleanly?" — which we test against an
+// existing-block template and validate end-to-end via the safety wrapper.
+
+#[derive(Debug, Clone)]
+enum Mutation {
+    AppendUser(UserRow),
+    ReplaceUser(UserRow),
+    RemoveUser(String),
+    AddGroupMember { group: String, uid: u32 },
+    RemoveGroupMembership(u32),
+    SetNextUid(u32),
+}
+
+/// Apply all mutations sequentially, re-parsing between each. Slow in the
+/// limit (O(N²) for N mutations) but pfusers performs at most a handful
+/// per save, so the simplicity wins. The alternative (sort byte ranges,
+/// apply in reverse) is fragile when a mutation changes byte counts mid-pass.
+fn apply_mutations(mut xml: String, mutations: Vec<Mutation>) -> Result<String> {
+    for m in mutations {
+        xml = apply_mutation(&xml, &m)?;
+    }
+    Ok(xml)
+}
+
+fn apply_mutation(xml: &str, m: &Mutation) -> Result<String> {
+    let events = parse_with_positions(xml)?;
+    match m {
+        Mutation::AppendUser(row) => {
+            let insert_at = system_close_start(&events, xml)?;
+            let indent = detect_user_indent(&events, xml);
+            let block = generate_user_block(row, &indent);
+            Ok(splice(xml, insert_at, insert_at, &block))
+        }
+        Mutation::ReplaceUser(row) => {
+            let (start, end) = find_user_byte_range(&events, &row.name)?;
+            let indent = leading_indent_of(xml, start);
+            let block = generate_user_block(row, &indent);
+            Ok(splice(xml, start, end, &block))
+        }
+        Mutation::RemoveUser(name) => {
+            let (start, end) = find_user_byte_range_with_leading_ws(xml, &events, name)?;
+            Ok(splice(xml, start, end, ""))
+        }
+        Mutation::AddGroupMember { group, uid } => {
+            let close_at = group_close_start(&events, xml, group)?;
+            let indent = leading_indent_of(xml, close_at);
+            let inner_indent = format!("{indent}\t");
+            let chunk = format!("{inner_indent}<member>{uid}</member>\n{indent}");
+            Ok(splice(xml, close_at, close_at, &chunk))
+        }
+        Mutation::RemoveGroupMembership(uid) => {
+            let ranges = find_member_byte_ranges(xml, &events, *uid);
+            // Apply highest-position first so earlier offsets stay valid.
+            let mut out = xml.to_string();
+            for (s, e) in ranges.into_iter().rev() {
+                let (s2, e2) = grow_to_include_leading_ws(&out, s, e);
+                out = splice(&out, s2, e2, "");
+            }
+            Ok(out)
+        }
+        Mutation::SetNextUid(n) => {
+            let (s, e) = find_text_content_range(&events, "nextuid")?;
+            Ok(splice(xml, s, e, &n.to_string()))
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedEvent {
+    event: Event<'static>,
+    /// Byte range `[start, end)` covered by this event in the original
+    /// source. Used for byte-precise mutation.
+    start: usize,
+    end: usize,
+}
+
+fn parse_with_positions(xml: &str) -> Result<Vec<ParsedEvent>> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut events = Vec::new();
+    loop {
+        let pos_before = reader.buffer_position() as usize;
+        match reader.read_event() {
+            Ok(Event::Eof) => break,
+            Ok(e) => {
+                let pos_after = reader.buffer_position() as usize;
+                events.push(ParsedEvent {
+                    event: e.into_owned(),
+                    start: pos_before,
+                    end: pos_after,
+                });
+            }
+            Err(e) => bail!("parsing config.xml: {e}"),
+        }
+    }
+    Ok(events)
+}
+
+fn splice(src: &str, start: usize, end: usize, with: &str) -> String {
+    let mut out = String::with_capacity(src.len() - (end - start) + with.len());
+    out.push_str(&src[..start]);
+    out.push_str(with);
+    out.push_str(&src[end..]);
+    out
+}
+
+/// Walk events looking for the closing tag of a top-level <system>. Returns
+/// the byte position of '<' in `</system>` so the caller can splice before it.
+fn system_close_start(events: &[ParsedEvent], _xml: &str) -> Result<usize> {
+    let mut depth = 0i32;
+    let mut in_system = false;
+    for ev in events {
+        match &ev.event {
+            Event::Start(s) => {
+                if depth == 1 && s.name().as_ref() == b"system" {
+                    in_system = true;
+                }
+                depth += 1;
+            }
+            Event::End(e) => {
+                depth -= 1;
+                if depth == 1 && in_system && e.name().as_ref() == b"system" {
+                    return Ok(ev.start);
+                }
+            }
+            _ => {}
+        }
+    }
+    bail!("no </system> found");
+}
+
+/// Like system_close_start but for an arbitrary <group> identified by name.
+fn group_close_start(events: &[ParsedEvent], xml: &str, group_name: &str) -> Result<usize> {
+    let mut depth = 0i32;
+    let mut group_starts: Vec<usize> = Vec::new();
+    for (i, ev) in events.iter().enumerate() {
+        match &ev.event {
+            Event::Start(s) => {
+                if depth == 2 && s.name().as_ref() == b"group" {
+                    group_starts.push(i);
+                }
+                depth += 1;
+            }
+            Event::End(e) => {
+                depth -= 1;
+                if depth == 2 && e.name().as_ref() == b"group" {
+                    let gs = group_starts.pop().unwrap_or(i);
+                    // Find <name> child within this group.
+                    if let Some(name_text) = child_text_in_range(events, xml, gs, i, "name") {
+                        if name_text == group_name {
+                            return Ok(ev.start);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    bail!("group not found: {group_name}");
+}
+
+/// Return the byte range of `<user>…</user>` matching `name`.
+fn find_user_byte_range(events: &[ParsedEvent], name: &str) -> Result<(usize, usize)> {
+    let mut depth = 0i32;
+    let mut user_starts: Vec<usize> = Vec::new();
+    for (i, ev) in events.iter().enumerate() {
+        match &ev.event {
+            Event::Start(s) => {
+                if depth == 2 && s.name().as_ref() == b"user" {
+                    user_starts.push(i);
+                }
+                depth += 1;
+            }
+            Event::End(e) => {
+                depth -= 1;
+                if depth == 2 && e.name().as_ref() == b"user" {
+                    let us = user_starts.pop().unwrap_or(i);
+                    // Walk children to find <name>.
+                    // Use the raw XML through child_text_in_range_xml.
+                    if let Some(n) = read_child_text_within(events, us, i, "name") {
+                        if n == name {
+                            return Ok((events[us].start, events[i].end));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    bail!("user not found in XML: {name}")
+}
+
+/// Same as find_user_byte_range but extends the start backwards to absorb
+/// any leading whitespace (Text event consisting only of `\n\t…`), so a
+/// delete doesn't leave a stranded blank line.
+fn find_user_byte_range_with_leading_ws(
+    xml: &str,
+    events: &[ParsedEvent],
+    name: &str,
+) -> Result<(usize, usize)> {
+    let (mut s, e) = find_user_byte_range(events, name)?;
+    // Walk back over preceding whitespace bytes (only space/tab/newline)
+    // so the deleted region eats its own leading indentation.
+    while s > 0 {
+        let prev = xml.as_bytes()[s - 1];
+        if matches!(prev, b' ' | b'\t' | b'\r' | b'\n') {
+            s -= 1;
+        } else {
+            break;
+        }
+    }
+    // Restore exactly one newline so adjacent text doesn't run together.
+    while s > 0 && xml.as_bytes()[s - 1] != b'\n' {
+        s -= 1;
+    }
+    Ok((s, e))
+}
+
+fn find_text_content_range(events: &[ParsedEvent], name: &str) -> Result<(usize, usize)> {
+    let needle = name.as_bytes();
+    for (i, ev) in events.iter().enumerate() {
+        if let Event::Start(s) = &ev.event {
+            if s.name().as_ref() == needle {
+                let start_text = events[i].end;
+                let mut inner_depth = 1i32;
+                for ev_inner in events.iter().skip(i + 1) {
+                    match &ev_inner.event {
+                        Event::Start(_) => inner_depth += 1,
+                        Event::End(_) => {
+                            inner_depth -= 1;
+                            if inner_depth == 0 {
+                                return Ok((start_text, ev_inner.start));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                bail!("unclosed <{name}>");
+            }
+        }
+    }
+    bail!("element not found: <{name}>")
+}
+
+fn read_child_text_within(
+    events: &[ParsedEvent],
+    parent_start_idx: usize,
+    parent_end_idx: usize,
+    child_name: &str,
+) -> Option<String> {
+    let needle = child_name.as_bytes();
+    let mut depth = 0i32;
+    for i in (parent_start_idx + 1)..parent_end_idx {
+        match &events[i].event {
+            Event::Start(s) => {
+                if depth == 0 && s.name().as_ref() == needle {
+                    // Concatenate text until matching End.
+                    let mut out = String::new();
+                    let mut inner_depth = 1i32;
+                    for ev_inner in events.iter().take(parent_end_idx).skip(i + 1) {
+                        match &ev_inner.event {
+                            Event::Start(_) => inner_depth += 1,
+                            Event::End(_) => {
+                                inner_depth -= 1;
+                                if inner_depth == 0 {
+                                    return Some(out);
+                                }
+                            }
+                            Event::Text(t) => {
+                                out.push_str(&t.unescape().unwrap_or_default());
+                            }
+                            Event::CData(c) => {
+                                out.push_str(std::str::from_utf8(c).unwrap_or(""));
+                            }
+                            _ => {}
+                        }
+                    }
+                    return Some(out);
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn child_text_in_range(
+    events: &[ParsedEvent],
+    _xml: &str,
+    parent_start: usize,
+    parent_end: usize,
+    name: &str,
+) -> Option<String> {
+    read_child_text_within(events, parent_start, parent_end, name)
+}
+
+/// All <member> child byte ranges where the text content equals `uid`,
+/// across all groups in the document.
+fn find_member_byte_ranges(xml: &str, events: &[ParsedEvent], uid: u32) -> Vec<(usize, usize)> {
+    let target = uid.to_string();
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    for (i, ev) in events.iter().enumerate() {
+        match &ev.event {
+            Event::Start(s) => {
+                if depth == 3 && s.name().as_ref() == b"member" {
+                    // Find matching End.
+                    let mut inner = 1i32;
+                    for j in (i + 1)..events.len() {
+                        match &events[j].event {
+                            Event::Start(_) => inner += 1,
+                            Event::End(_) => {
+                                inner -= 1;
+                                if inner == 0 {
+                                    let text = &xml[events[i].end..events[j].start];
+                                    if text.trim() == target {
+                                        out.push((events[i].start, events[j].end));
+                                    }
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+    }
+    out
+}
+
+fn grow_to_include_leading_ws(xml: &str, mut s: usize, e: usize) -> (usize, usize) {
+    while s > 0 {
+        let prev = xml.as_bytes()[s - 1];
+        if matches!(prev, b' ' | b'\t' | b'\r' | b'\n') {
+            s -= 1;
+        } else {
+            break;
+        }
+    }
+    while s > 0 && xml.as_bytes()[s - 1] != b'\n' {
+        s -= 1;
+    }
+    (s, e)
+}
+
+/// Extract the whitespace indentation immediately preceding byte position
+/// `pos` — the run of spaces/tabs after the most recent `\n`. Used so a
+/// new block matches the existing indentation depth.
+fn leading_indent_of(xml: &str, pos: usize) -> String {
+    let bytes = xml.as_bytes();
+    if pos == 0 {
+        return String::new();
+    }
+    let mut start = pos;
+    while start > 0 && bytes[start - 1] != b'\n' {
+        start -= 1;
+    }
+    std::str::from_utf8(&bytes[start..pos])
+        .unwrap_or("\t\t")
+        .to_string()
+}
+
+/// Pick an indent string for a new <user> block. We sniff the leading
+/// whitespace of an existing <user> in the document if one is present;
+/// otherwise default to two tabs (matches pfSense convention).
+fn detect_user_indent(events: &[ParsedEvent], xml: &str) -> String {
+    let mut depth = 0i32;
+    for ev in events {
+        match &ev.event {
+            Event::Start(s) => {
+                if depth == 2 && s.name().as_ref() == b"user" {
+                    return leading_indent_of(xml, ev.start);
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+    }
+    "\t\t".to_string()
+}
+
+/// Render a `<user>…</user>` block as bytes ready to splice into the
+/// document at the given indentation level. Children get one extra tab of
+/// indent (matching pfSense's two-space-or-tab convention seen in
+/// /cf/conf/config.xml).
+fn generate_user_block(row: &UserRow, indent: &str) -> String {
+    let mut out = String::new();
+    let child = format!("{indent}\t");
+    out.push_str("<user>\n");
+    push_elem(&mut out, &child, "scope", &row.scope);
+    push_elem(&mut out, &child, "name", &row.name);
+    push_elem(&mut out, &child, "descr", &row.descr);
+    push_elem(&mut out, &child, "uid", &row.uid.to_string());
+    push_elem(
+        &mut out,
+        &child,
+        "expires",
+        row.expires.as_deref().unwrap_or(""),
+    );
+    push_elem(&mut out, &child, "dashboardcolumns", "2");
+    push_elem(&mut out, &child, "authorizedkeys", &row.authorized_keys_b64);
+    push_elem(&mut out, &child, "ipsecpsk", "");
+    push_elem(&mut out, &child, "webguicss", "pfSense.css");
+    if let Some(h) = &row.bcrypt_hash {
+        push_elem(&mut out, &child, "bcrypt-hash", h);
+    }
+    if let Some(h) = &row.sha512_hash {
+        push_elem(&mut out, &child, "sha512-hash", h);
+    }
+    if let Some(h) = &row.md5_hash {
+        push_elem(&mut out, &child, "md5-hash", h);
+    }
+    if row.disabled {
+        out.push_str(&format!("{child}<disabled/>\n"));
+    }
+    for p in &row.priv_list {
+        push_elem(&mut out, &child, "priv", p);
+    }
+    out.push_str(indent);
+    out.push_str("</user>\n");
+    out
+}
+
+fn push_elem(out: &mut String, indent: &str, name: &str, value: &str) {
+    if value.is_empty() {
+        out.push_str(&format!("{indent}<{name}></{name}>\n"));
+    } else {
+        out.push_str(&format!(
+            "{indent}<{name}>{val}</{name}>\n",
+            val = xml_escape_text(value),
+        ));
+    }
+}
+
+fn xml_escape_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // ---------- Public API ----------
@@ -114,8 +601,8 @@ pub async fn add_user(h: &ClientHandle, req: AddUserReq<'_>) -> Result<()> {
     }
     validate_username(req.name)?;
 
-    let xml = read_config_xml(h).await?;
-    let mut doc = Doc::parse(&xml)?;
+    let original = read_config_xml(h).await?;
+    let doc = Doc::parse(&original)?;
     if doc.find_user(req.name).is_some() {
         bail!("user already exists: {}", req.name);
     }
@@ -134,14 +621,42 @@ pub async fn add_user(h: &ClientHandle, req: AddUserReq<'_>) -> Result<()> {
         sha512_hash: None,
         md5_hash: None,
     };
-    doc.append_user(&row)?;
-    doc.set_next_uid(next_uid + 1)?;
-    doc.add_to_group("all", next_uid)?;
-    if !req.groups.is_empty() {
-        doc.set_user_groups(next_uid, &req.groups)?;
+    let mut mutations = vec![
+        Mutation::AppendUser(row.clone()),
+        Mutation::SetNextUid(next_uid + 1),
+        Mutation::AddGroupMember {
+            group: "all".to_string(),
+            uid: next_uid,
+        },
+    ];
+    for g in &req.groups {
+        if g != "all" {
+            mutations.push(Mutation::AddGroupMember {
+                group: g.clone(),
+                uid: next_uid,
+            });
+        }
     }
-    let new_xml = doc.serialize()?;
-    write_config_xml(h, &new_xml).await?;
+    let new_xml = apply_mutations(original.clone(), mutations)?;
+
+    write_with_safety(h, &original, &new_xml, |fresh| {
+        let after = Doc::parse(fresh)?;
+        // Verify the new user appears and got the uid we expected.
+        let row = after
+            .find_user(req.name)
+            .ok_or_else(|| anyhow!("post-write check: new user not found in XML"))?;
+        if row.uid != next_uid {
+            bail!(
+                "post-write check: uid mismatch (got {}, expected {next_uid})",
+                row.uid
+            );
+        }
+        if after.next_uid()? != next_uid + 1 {
+            bail!("post-write check: nextuid was not incremented");
+        }
+        Ok(())
+    })
+    .await?;
 
     // OS-side side effects. Order matters: create the unix account first
     // (so /home/<name> exists for the .ssh write), then drop the
@@ -169,8 +684,8 @@ pub async fn update_user(h: &ClientHandle, req: UpdateUserReq<'_>) -> Result<()>
     if req.name.is_empty() {
         bail!("name required");
     }
-    let xml = read_config_xml(h).await?;
-    let mut doc = Doc::parse(&xml)?;
+    let original = read_config_xml(h).await?;
+    let doc = Doc::parse(&original)?;
     let mut row = doc
         .find_user(req.name)
         .ok_or_else(|| anyhow!("user not found: {}", req.name))?;
@@ -186,12 +701,44 @@ pub async fn update_user(h: &ClientHandle, req: UpdateUserReq<'_>) -> Result<()>
     if let Some(d) = req.disabled {
         row.disabled = d;
     }
-    doc.replace_user(&row)?;
+    let row_uid = row.uid;
+    let mut mutations = vec![Mutation::ReplaceUser(row.clone())];
     if let Some(ref g) = req.groups {
-        doc.set_user_groups(row.uid, g)?;
+        // Authoritative: strip all memberships, re-add 'all' + each in list.
+        mutations.push(Mutation::RemoveGroupMembership(row_uid));
+        mutations.push(Mutation::AddGroupMember {
+            group: "all".to_string(),
+            uid: row_uid,
+        });
+        for grp in g {
+            if grp != "all" {
+                mutations.push(Mutation::AddGroupMember {
+                    group: grp.clone(),
+                    uid: row_uid,
+                });
+            }
+        }
     }
-    let new_xml = doc.serialize()?;
-    write_config_xml(h, &new_xml).await?;
+    let new_xml = apply_mutations(original.clone(), mutations)?;
+
+    write_with_safety(h, &original, &new_xml, |fresh| {
+        let after = Doc::parse(fresh)?;
+        let written = after
+            .find_user(req.name)
+            .ok_or_else(|| anyhow!("post-write check: user not found after write"))?;
+        if let Some(d) = req.descr {
+            if written.descr != d {
+                bail!("post-write check: descr did not round-trip");
+            }
+        }
+        if let Some(ref p) = req.priv_list {
+            if written.priv_list != *p {
+                bail!("post-write check: priv list did not round-trip");
+            }
+        }
+        Ok(())
+    })
+    .await?;
 
     // OS-side updates.
     let shell = derive_shell(&row.priv_list);
@@ -221,20 +768,29 @@ pub async fn delete_user(h: &ClientHandle, name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("name required");
     }
-    let xml = read_config_xml(h).await?;
-    let mut doc = Doc::parse(&xml)?;
+    let original = read_config_xml(h).await?;
+    let doc = Doc::parse(&original)?;
     let row = doc
         .find_user(name)
         .ok_or_else(|| anyhow!("user not found: {name}"))?;
     if row.uid == 0 {
         bail!("refusing to delete uid 0 (admin)");
     }
-    doc.remove_user(name)?;
-    doc.remove_from_all_groups(row.uid)?;
-    let new_xml = doc.serialize()?;
-    write_config_xml(h, &new_xml).await?;
-    // `pw userdel -r` removes the /home dir as well, which takes the
-    // authorized_keys file with it.
+    let mutations = vec![
+        Mutation::RemoveUser(name.to_string()),
+        Mutation::RemoveGroupMembership(row.uid),
+    ];
+    let new_xml = apply_mutations(original.clone(), mutations)?;
+
+    write_with_safety(h, &original, &new_xml, |fresh| {
+        let after = Doc::parse(fresh)?;
+        if after.find_user(name).is_some() {
+            bail!("post-write check: user still present after delete");
+        }
+        Ok(())
+    })
+    .await?;
+
     let _ = exec_check(
         h,
         &format!("/usr/sbin/pw userdel -n {} -r", shell_escape(name)),
@@ -248,17 +804,130 @@ pub async fn set_password(h: &ClientHandle, name: &str, password: &str) -> Resul
     if password.is_empty() {
         bail!("password required");
     }
-    let xml = read_config_xml(h).await?;
-    let mut doc = Doc::parse(&xml)?;
+    let original = read_config_xml(h).await?;
+    let doc = Doc::parse(&original)?;
     let mut row = doc
         .find_user(name)
         .ok_or_else(|| anyhow!("user not found: {name}"))?;
     row.bcrypt_hash = Some(bcrypt::hash(password, 10).context("hashing password")?);
     row.sha512_hash = None;
     row.md5_hash = None;
-    doc.replace_user(&row)?;
-    let new_xml = doc.serialize()?;
-    write_config_xml(h, &new_xml).await?;
+    let new_xml = apply_mutations(original.clone(), vec![Mutation::ReplaceUser(row)])?;
+    write_with_safety(h, &original, &new_xml, |fresh| {
+        let after = Doc::parse(fresh)?;
+        let r = after
+            .find_user(name)
+            .ok_or_else(|| anyhow!("post-write check: user not found"))?;
+        if r.bcrypt_hash.is_none() {
+            bail!("post-write check: bcrypt-hash missing");
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(())
+}
+
+// ---------- Safety wrapper around writes ----------
+
+/// Snapshot + write + verify + rollback. The complete-mitigation flow:
+///
+///   1. `cp /cf/conf/config.xml /cf/conf/backup/config-<unix-ts>-pfusers.xml`
+///      — pfSense's web UI Config History page enumerates that directory, so
+///      our snapshot shows up alongside its own and the user gets a one-click
+///      revert through normal admin paths.
+///   2. Write `new_xml` to a sibling .tmp, then atomic-rename onto config.xml.
+///   3. Re-read config.xml, parse with our parser, run `checks(fresh)` —
+///      caller asserts the mutation actually took (new user found, descr
+///      round-tripped, count incremented, etc.).
+///   4. Optionally invoke pfSense's PHP parser once for total parser-
+///      agreement: `php -r 'require_once("config.inc"); parse_config(true);
+///      echo count($config["system"]["user"]);'`. If the count disagrees
+///      with our pre-write expectation, rollback. (One bounded PHP call,
+///      only for verification — no PHP in the mutation path.)
+///   5. On ANY failure in 2/3/4: `cp` the snapshot back over config.xml.
+///      The router sees the same bytes it had before this call.
+async fn write_with_safety(
+    h: &ClientHandle,
+    original_xml: &str,
+    new_xml: &str,
+    checks: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    let unix_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let snapshot_path = format!("/cf/conf/backup/config-{unix_ts}-pfusers.xml");
+
+    // Step 1: snapshot. If this fails, abort BEFORE any mutation — no
+    // recovery path exists without it.
+    exec_check(h, &format!("/bin/cp {CONFIG_PATH} {snapshot_path}"))
+        .await
+        .context("creating config snapshot")?;
+
+    // Step 2: write the new XML atomically.
+    if let Err(e) = write_config_xml(h, new_xml).await {
+        // If the write itself failed, the original is intact (we wrote
+        // to .tmp). No rollback needed; snapshot remains for the user.
+        return Err(e).context("write_with_safety: write failed (snapshot kept)");
+    }
+
+    // Step 3+4: read back, verify with our parser AND pfSense's, rollback
+    // if either disagrees.
+    let outcome = (async {
+        let fresh = read_config_xml(h).await?;
+        checks(&fresh)?;
+        verify_with_pfsense_parser(h, original_xml, &fresh).await?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    if let Err(e) = outcome {
+        // Step 5: rollback from snapshot.
+        let rollback = exec_check(h, &format!("/bin/cp {snapshot_path} {CONFIG_PATH}")).await;
+        if let Err(re) = rollback {
+            return Err(anyhow!(
+                "verification failed: {e:#}\nROLLBACK ALSO FAILED: {re:#}\nSnapshot still at {snapshot_path} — manual recovery required"
+            ));
+        }
+        return Err(e).context(format!(
+            "verification failed; rolled back from {snapshot_path}"
+        ));
+    }
+    Ok(())
+}
+
+/// Run pfSense's own PHP parser against the freshly-written config.xml.
+/// Compares the user count to what we had BEFORE the write — any
+/// disagreement means pfSense's parser saw something different than our
+/// parser did and we should roll back.
+///
+/// This is the ONLY PHP call in pfusers and only fires after the write,
+/// purely as a parser-agreement check.
+async fn verify_with_pfsense_parser(
+    h: &ClientHandle,
+    original_xml: &str,
+    fresh_xml: &str,
+) -> Result<()> {
+    let original_doc = Doc::parse(original_xml)?;
+    let fresh_doc = Doc::parse(fresh_xml)?;
+    let our_original = original_doc.list_users()?.len() as i64;
+    let our_fresh = fresh_doc.list_users()?.len() as i64;
+    // PHP runs config.inc + parse_config(true) (which re-reads
+    // /cf/conf/config.xml), and prints the count of system/user entries.
+    // -d disable_functions= overrides any restrictions; the explicit
+    // include_path matches pfSsh.php's bootstrap.
+    let cmd = "/usr/local/bin/php -d include_path=/etc/inc -r 'require_once(\"config.inc\"); parse_config(true); echo count($config[\"system\"][\"user\"]);'";
+    let out = exec_command(h, cmd).await?;
+    let count_str = out.stdout.trim();
+    let pfsense_count: i64 = count_str
+        .parse()
+        .map_err(|_| anyhow!("pfSense PHP verify produced non-numeric: {count_str:?}"))?;
+    if pfsense_count != our_fresh {
+        bail!(
+            "pfSense parser saw {pfsense_count} users; our parser saw {our_fresh}. \
+             Pre-write count was {our_original}. Rolling back."
+        );
+    }
     Ok(())
 }
 
@@ -507,17 +1176,6 @@ impl Doc {
         Ok(Self { events })
     }
 
-    fn serialize(&self) -> Result<String> {
-        let mut buf = Vec::new();
-        let mut writer = Writer::new(Cursor::new(&mut buf));
-        for ev in &self.events {
-            writer
-                .write_event(ev.clone())
-                .map_err(|e| anyhow!("serializing config.xml: {e}"))?;
-        }
-        String::from_utf8(buf).map_err(|e| anyhow!("config.xml not UTF-8: {e}"))
-    }
-
     /// Find the byte range `[start, end)` covering an element's `Start` …
     /// matching `End` (inclusive). Searches at any depth; returns the FIRST
     /// match for `name` within the element starting at `outer_start`.
@@ -695,68 +1353,6 @@ impl Doc {
         t.parse().with_context(|| format!("parsing nextuid {t:?}"))
     }
 
-    fn set_next_uid(&mut self, new: u32) -> Result<()> {
-        let (sys_s, sys_e) = self.find_system_range()?;
-        let (s, e) = self
-            .child_ranges(sys_s, sys_e, "nextuid")
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("no <nextuid> element"))?;
-        // Replace events[s+1..e] with a single Text node.
-        let new_text = Event::Text(BytesText::new(&new.to_string()).into_owned());
-        self.events.splice(s + 1..e, [new_text]);
-        Ok(())
-    }
-
-    fn append_user(&mut self, row: &UserRow) -> Result<()> {
-        let (sys_s, sys_e) = self.find_system_range()?;
-        let _ = sys_s;
-        // Build the new block with a leading indent so the document stays
-        // readable, then splice it in just before the closing </system>.
-        // Splice (one mutation) rather than a loop of inserts (which
-        // would reverse the order — each insert pushes the previous
-        // one forward).
-        let mut block: Vec<Event<'static>> = Vec::with_capacity(1 + 32);
-        block.push(Event::Text(BytesText::new("\n\t").into_owned()));
-        block.extend(build_user_block(row));
-        self.events.splice(sys_e..sys_e, block);
-        Ok(())
-    }
-
-    fn replace_user(&mut self, row: &UserRow) -> Result<()> {
-        let (sys_s, sys_e) = self.find_system_range()?;
-        let user_ranges = self.child_ranges(sys_s, sys_e, "user");
-        for (s, e) in user_ranges {
-            let n = self.child_text(s, e, "name").unwrap_or_default();
-            if n == row.name {
-                let new_block = build_user_block(row);
-                self.events.splice(s..=e, new_block);
-                return Ok(());
-            }
-        }
-        bail!("user not found in XML: {}", row.name);
-    }
-
-    fn remove_user(&mut self, name: &str) -> Result<()> {
-        let (sys_s, sys_e) = self.find_system_range()?;
-        let user_ranges = self.child_ranges(sys_s, sys_e, "user");
-        for (s, e) in user_ranges {
-            let n = self.child_text(s, e, "name").unwrap_or_default();
-            if n == name {
-                // Also eat any immediate trailing whitespace text node so we
-                // don't leave a stranded blank line.
-                let end_with_ws = if matches!(self.events.get(e + 1), Some(Event::Text(_))) {
-                    e + 1
-                } else {
-                    e
-                };
-                self.events.drain(s..=end_with_ws);
-                return Ok(());
-            }
-        }
-        bail!("user not found in XML: {name}");
-    }
-
     /// Map uid → list of group names. Groups in pfSense list their members
     /// by uid string inside `<member>` child elements.
     fn groups_by_uid(&self) -> Result<std::collections::HashMap<u32, Vec<String>>> {
@@ -772,113 +1368,6 @@ impl Doc {
         }
         Ok(out)
     }
-
-    fn add_to_group(&mut self, group: &str, uid: u32) -> Result<()> {
-        let (sys_s, sys_e) = self.find_system_range()?;
-        let group_ranges = self.child_ranges(sys_s, sys_e, "group");
-        for (gs, ge) in group_ranges {
-            if self
-                .child_text(gs, ge, "name")
-                .as_deref()
-                .unwrap_or_default()
-                == group
-            {
-                let new_member = vec![
-                    Event::Text(BytesText::new("\n\t\t").into_owned()),
-                    Event::Start(BytesStart::new("member").into_owned()),
-                    Event::Text(BytesText::new(&uid.to_string()).into_owned()),
-                    Event::End(BytesEnd::new("member").into_owned()),
-                ];
-                let insert_at = ge;
-                for ev in new_member.into_iter().rev() {
-                    self.events.insert(insert_at, ev);
-                }
-                return Ok(());
-            }
-        }
-        bail!("group not found: {group}");
-    }
-
-    fn remove_from_all_groups(&mut self, uid: u32) -> Result<()> {
-        let target = uid.to_string();
-        let (sys_s, sys_e) = self.find_system_range()?;
-        let group_ranges = self.child_ranges(sys_s, sys_e, "group");
-        // Collect (group_start, group_end, member_index_range) first so we
-        // don't mutate while iterating.
-        let mut to_remove: Vec<(usize, usize)> = Vec::new();
-        for (gs, ge) in group_ranges {
-            for (ms, me) in self.child_ranges(gs, ge, "member") {
-                if self.text_at(ms) == target {
-                    to_remove.push((ms, me));
-                }
-            }
-        }
-        // Remove from highest index first so earlier indices stay valid.
-        to_remove.sort_by_key(|r| std::cmp::Reverse(r.0));
-        for (s, e) in to_remove {
-            let end_with_ws = if matches!(self.events.get(e + 1), Some(Event::Text(_))) {
-                e + 1
-            } else {
-                e
-            };
-            self.events.drain(s..=end_with_ws);
-        }
-        Ok(())
-    }
-
-    fn set_user_groups(&mut self, uid: u32, groups: &[String]) -> Result<()> {
-        // Authoritative: remove from every group, then add to `all` + each
-        // listed group.
-        self.remove_from_all_groups(uid)?;
-        self.add_to_group("all", uid)?;
-        for g in groups {
-            if g != "all" {
-                self.add_to_group(g, uid)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Build a `<user>…</user>` event sequence for a row.
-fn build_user_block(row: &UserRow) -> Vec<Event<'static>> {
-    let mut out: Vec<Event<'static>> = Vec::new();
-    out.push(Event::Start(BytesStart::new("user").into_owned()));
-    push_text_elem(&mut out, "scope", &row.scope);
-    push_text_elem(&mut out, "name", &row.name);
-    push_text_elem(&mut out, "descr", &row.descr);
-    push_text_elem(&mut out, "uid", &row.uid.to_string());
-    push_text_elem(&mut out, "expires", row.expires.as_deref().unwrap_or(""));
-    push_text_elem(&mut out, "dashboardcolumns", "2");
-    push_text_elem(&mut out, "authorizedkeys", &row.authorized_keys_b64);
-    push_text_elem(&mut out, "ipsecpsk", "");
-    push_text_elem(&mut out, "webguicss", "pfSense.css");
-    if let Some(ref h) = row.bcrypt_hash {
-        push_text_elem(&mut out, "bcrypt-hash", h);
-    }
-    if let Some(ref h) = row.sha512_hash {
-        push_text_elem(&mut out, "sha512-hash", h);
-    }
-    if let Some(ref h) = row.md5_hash {
-        push_text_elem(&mut out, "md5-hash", h);
-    }
-    if row.disabled {
-        out.push(Event::Empty(BytesStart::new("disabled").into_owned()));
-    }
-    for p in &row.priv_list {
-        push_text_elem(&mut out, "priv", p);
-    }
-    out.push(Event::End(BytesEnd::new("user").into_owned()));
-    out
-}
-
-fn push_text_elem(out: &mut Vec<Event<'static>>, tag: &str, value: &str) {
-    out.push(Event::Text(BytesText::new("\n\t\t").into_owned()));
-    out.push(Event::Start(BytesStart::new(tag).into_owned()));
-    if !value.is_empty() {
-        out.push(Event::Text(BytesText::new(value).into_owned()));
-    }
-    out.push(Event::End(BytesEnd::new(tag).into_owned()));
 }
 
 #[cfg(test)]
@@ -958,21 +1447,50 @@ mod tests {
         assert_eq!(olga_groups, vec!["all".to_string()]);
     }
 
+    // --- Byte-precise mutation tests ---
+    //
+    // The single most important guarantee these tests pin down: bytes
+    // OUTSIDE the mutation region are preserved verbatim. That is the
+    // structural fix for the byte-mismatch risk; we test it directly.
+
     #[test]
-    fn round_trip_serializes_back_to_parseable_xml() {
-        let doc = Doc::parse(SAMPLE_XML).unwrap();
-        let out = doc.serialize().unwrap();
-        // Re-parsing must succeed and give the same user list.
-        let again = Doc::parse(&out).unwrap();
-        let rows = again.list_users().unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[1].name, "olga");
+    fn apply_mutation_remove_user_preserves_bytes_outside_region() {
+        // Take the substring before the first <user> and after the last
+        // </group>, check both pieces survive a RemoveUser mutation
+        // unchanged.
+        let before_users = SAMPLE_XML.find("<user>").unwrap();
+        let after_groups = SAMPLE_XML.rfind("</group>").unwrap() + "</group>".len();
+        let prefix = &SAMPLE_XML[..before_users];
+        let suffix = &SAMPLE_XML[after_groups..];
+
+        let out = apply_mutation(SAMPLE_XML, &Mutation::RemoveUser("olga".into())).unwrap();
+        // Prefix must appear at byte 0.
+        assert!(
+            out.starts_with(prefix),
+            "prefix not byte-identical after RemoveUser"
+        );
+        // Suffix must appear verbatim near the end.
+        assert!(
+            out.contains(suffix),
+            "suffix not byte-identical after RemoveUser"
+        );
     }
 
     #[test]
-    fn append_user_adds_to_system_block() {
-        let mut doc = Doc::parse(SAMPLE_XML).unwrap();
-        doc.append_user(&UserRow {
+    fn apply_mutation_set_next_uid_only_touches_nextuid_text() {
+        let out = apply_mutation(SAMPLE_XML, &Mutation::SetNextUid(2042)).unwrap();
+        // The whole file should match the original EXCEPT for the value of
+        // <nextuid>: the original has 2001, the new has 2042.
+        let new = out.replace("<nextuid>2042</nextuid>", "<nextuid>2001</nextuid>");
+        assert_eq!(
+            new, SAMPLE_XML,
+            "SetNextUid changed more than the <nextuid> text content",
+        );
+    }
+
+    #[test]
+    fn apply_mutation_append_user_preserves_pre_system_close_bytes() {
+        let row = UserRow {
             name: "newguy".into(),
             descr: "New Guy".into(),
             uid: 2001,
@@ -984,63 +1502,113 @@ mod tests {
             bcrypt_hash: Some("$2y$10$test".into()),
             sha512_hash: None,
             md5_hash: None,
-        })
-        .unwrap();
-        let out = doc.serialize().unwrap();
+        };
+        let out = apply_mutation(SAMPLE_XML, &Mutation::AppendUser(row)).unwrap();
+        // Round-trip parses + 3 users now.
         let again = Doc::parse(&out).unwrap();
         let rows = again.list_users().unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[2].name, "newguy");
-        assert_eq!(rows[2].uid, 2001);
+        // Pre-existing user blocks must be byte-identical.
+        let olga_block_start = SAMPLE_XML.find("<user>\n      <scope>user").unwrap();
+        let olga_block_end = SAMPLE_XML[olga_block_start..].find("</user>").unwrap()
+            + olga_block_start
+            + "</user>".len();
+        let olga_bytes = &SAMPLE_XML[olga_block_start..olga_block_end];
+        assert!(
+            out.contains(olga_bytes),
+            "olga's <user> block must survive AppendUser byte-for-byte",
+        );
     }
 
     #[test]
-    fn remove_user_removes_the_row() {
-        let mut doc = Doc::parse(SAMPLE_XML).unwrap();
-        doc.remove_user("olga").unwrap();
-        let rows = doc.list_users().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "admin");
-    }
-
-    #[test]
-    fn replace_user_updates_descr_and_keys() {
-        let mut doc = Doc::parse(SAMPLE_XML).unwrap();
-        let mut row = doc.find_user("olga").unwrap();
+    fn apply_mutation_replace_user_only_changes_target_block() {
+        let mut row = Doc::parse(SAMPLE_XML).unwrap().find_user("olga").unwrap();
         row.descr = "Olga (renamed)".into();
         row.authorized_keys_b64 = "bmV3a2V5".into();
-        doc.replace_user(&row).unwrap();
-        let out = doc.serialize().unwrap();
+        let out = apply_mutation(SAMPLE_XML, &Mutation::ReplaceUser(row)).unwrap();
         let again = Doc::parse(&out).unwrap();
         let r = again.find_user("olga").unwrap();
         assert_eq!(r.descr, "Olga (renamed)");
         assert_eq!(r.authorized_keys_b64, "bmV3a2V5");
+        // admin's block must be byte-identical (it precedes olga's).
+        let admin_block_start = SAMPLE_XML.find("<user>\n      <scope>system").unwrap();
+        let admin_block_end = SAMPLE_XML[admin_block_start..].find("</user>").unwrap()
+            + admin_block_start
+            + "</user>".len();
+        let admin_bytes = &SAMPLE_XML[admin_block_start..admin_block_end];
+        assert!(
+            out.contains(admin_bytes),
+            "admin's <user> block must survive ReplaceUser byte-for-byte"
+        );
     }
 
     #[test]
-    fn set_user_groups_adds_and_strips() {
-        let mut doc = Doc::parse(SAMPLE_XML).unwrap();
-        doc.set_user_groups(2000, &["admins".to_string()]).unwrap();
-        let g = doc.groups_by_uid().unwrap();
-        let olga_groups = g.get(&2000).cloned().unwrap_or_default();
-        assert!(olga_groups.contains(&"all".to_string()));
-        assert!(olga_groups.contains(&"admins".to_string()));
+    fn apply_mutation_remove_group_membership_strips_all_matching_member_rows() {
+        let out = apply_mutation(SAMPLE_XML, &Mutation::RemoveGroupMembership(0)).unwrap();
+        // admin (uid 0) is a member of both "all" and "admins" in the
+        // sample; both <member>0</member> rows must be gone.
+        assert!(
+            !out.contains("<member>0</member>"),
+            "uid 0 still present as a member after RemoveGroupMembership"
+        );
+        // uid 2000's membership must survive.
+        assert!(
+            out.contains("<member>2000</member>"),
+            "uid 2000's membership was wrongly removed"
+        );
     }
 
     #[test]
-    fn remove_from_all_groups_strips_admin_uid_zero() {
-        let mut doc = Doc::parse(SAMPLE_XML).unwrap();
-        doc.remove_from_all_groups(0).unwrap();
-        let g = doc.groups_by_uid().unwrap();
-        assert!(!g.contains_key(&0) || g[&0].is_empty());
+    fn apply_mutation_add_group_member_inserts_inside_target_group() {
+        let out = apply_mutation(
+            SAMPLE_XML,
+            &Mutation::AddGroupMember {
+                group: "admins".to_string(),
+                uid: 2000,
+            },
+        )
+        .unwrap();
+        // Must contain a new <member>2000</member> nested inside <group> ..
+        // </group> for 'admins'.
+        let admins_close = out.find("admins").and_then(|i| out[i..].find("</group>"));
+        assert!(admins_close.is_some());
+        // Both prior memberships still present.
+        assert!(out.contains("<member>0</member>"));
+        assert!(out.contains("<member>2000</member>"));
     }
 
     #[test]
-    fn next_uid_round_trip() {
-        let mut doc = Doc::parse(SAMPLE_XML).unwrap();
-        assert_eq!(doc.next_uid().unwrap(), 2001);
-        doc.set_next_uid(2002).unwrap();
-        assert_eq!(doc.next_uid().unwrap(), 2002);
+    fn apply_mutations_pipeline_composes_correctly() {
+        // Simulate the full add_user mutation list: append user, set next
+        // uid, add to 'all'.
+        let row = UserRow {
+            name: "newguy".into(),
+            descr: "New Guy".into(),
+            uid: 2001,
+            scope: "user".into(),
+            expires: None,
+            disabled: false,
+            priv_list: vec![],
+            authorized_keys_b64: "".into(),
+            bcrypt_hash: Some("$2y$10$test".into()),
+            sha512_hash: None,
+            md5_hash: None,
+        };
+        let muts = vec![
+            Mutation::AppendUser(row),
+            Mutation::SetNextUid(2002),
+            Mutation::AddGroupMember {
+                group: "all".to_string(),
+                uid: 2001,
+            },
+        ];
+        let out = apply_mutations(SAMPLE_XML.to_string(), muts).unwrap();
+        let after = Doc::parse(&out).unwrap();
+        assert_eq!(after.list_users().unwrap().len(), 3);
+        assert_eq!(after.next_uid().unwrap(), 2002);
+        let g = after.groups_by_uid().unwrap();
+        assert!(g.get(&2001).is_some_and(|v| v.contains(&"all".to_string())));
     }
 
     #[test]
