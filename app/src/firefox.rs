@@ -200,7 +200,7 @@ pub fn install_firefox_policies(bundle: &Path, socks_host: &str, socks_port: u16
     let socks_addr = format!("{}:{}", socks_host, socks_port);
     let json = format!(
         r#"{{
-  "_comment": "Managed by БелкаТуннель. Forces all Firefox traffic through the SSH SOCKS5 tunnel.",
+  "_comment": "Managed by БелкаТуннель. Forces all Firefox traffic through the SSH SOCKS5 tunnel + Tor-Browser-style anti-fingerprinting.",
   "policies": {{
     "Proxy": {{
       "Mode": "manual",
@@ -209,11 +209,60 @@ pub fn install_firefox_policies(bundle: &Path, socks_host: &str, socks_port: u16
       "UseProxyForDNS": true,
       "Locked": true
     }},
-    "DisableTelemetry": true,
-    "DisableFirefoxStudies": true,
+    "DNSOverHTTPS": {{
+      "Enabled": true,
+      "Locked": true
+    }},
+    "EnableTrackingProtection": {{
+      "Value": true,
+      "Locked": true,
+      "Cryptomining": true,
+      "Fingerprinting": true,
+      "EmailTracking": true
+    }},
+    "WebRTCIPHandling": {{
+      "Mode": "disable_non_proxied_udp",
+      "Locked": true
+    }},
+    "Permissions": {{
+      "Geolocation": {{ "BlockNewRequests": true, "Locked": true }},
+      "Camera":      {{ "BlockNewRequests": true, "Locked": true }},
+      "Microphone":  {{ "BlockNewRequests": true, "Locked": true }},
+      "Notifications": {{ "BlockNewRequests": true, "Locked": true }}
+    }},
+    "Preferences": {{
+      "geo.enabled":                        {{ "Value": false, "Status": "locked" }},
+      "geo.provider.network.url":           {{ "Value": "",    "Status": "locked" }},
+      "browser.region.network.url":         {{ "Value": "",    "Status": "locked" }},
+      "browser.search.geoSpecificDefaults": {{ "Value": false, "Status": "locked" }},
+
+      "privacy.resistFingerprinting":                       {{ "Value": true,  "Status": "locked" }},
+      "privacy.fingerprintingProtection":                   {{ "Value": true,  "Status": "locked" }},
+      "privacy.firstparty.isolate":                         {{ "Value": true,  "Status": "locked" }},
+      "privacy.trackingprotection.fingerprinting.enabled":  {{ "Value": true,  "Status": "locked" }},
+      "privacy.trackingprotection.cryptomining.enabled":    {{ "Value": true,  "Status": "locked" }},
+
+      "media.peerconnection.ice.default_address_only":      {{ "Value": true,  "Status": "locked" }},
+      "media.navigator.enabled":                            {{ "Value": false, "Status": "locked" }},
+
+      "dom.event.clipboardevents.enabled":                  {{ "Value": false, "Status": "locked" }},
+      "dom.battery.enabled":                                {{ "Value": false, "Status": "locked" }},
+      "dom.webaudio.enabled":                               {{ "Value": false, "Status": "locked" }},
+      "dom.gamepad.enabled":                                {{ "Value": false, "Status": "locked" }},
+
+      "network.http.referer.XOriginPolicy":                 {{ "Value": 1,     "Status": "locked" }},
+      "network.http.referer.XOriginTrimmingPolicy":         {{ "Value": 2,     "Status": "locked" }},
+      "network.http.sendRefererHeader":                     {{ "Value": 1,     "Status": "locked" }},
+
+      "intl.accept_languages":                              {{ "Value": "en-US, en", "Status": "locked" }},
+      "intl.locale.requested":                              {{ "Value": "en-US",     "Status": "locked" }}
+    }},
+    "DisableSecurityBypass": false,
+    "DisableTelemetry":        true,
+    "DisableFirefoxStudies":   true,
     "DontCheckDefaultBrowser": true,
-    "OverrideFirstRunPage": "https://ifconfig.me/",
-    "DisablePocket": true
+    "OverrideFirstRunPage":    "https://ifconfig.me/",
+    "DisablePocket":           true
   }}
 }}
 "#,
