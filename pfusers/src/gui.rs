@@ -193,34 +193,65 @@ impl App {
                 cfg.ssh.host_key_fingerprint.clone(),
             )
             .await;
-            let mut s = state.lock().unwrap();
-            match r {
-                Ok((handle, tofu)) => {
-                    s.conn = ConnState::Connected(handle);
-                    if let Some(fp) = tofu {
-                        // Persist the observed fingerprint so subsequent
-                        // launches start in locked mode. Save inline; we
-                        // hold the SharedState lock briefly, no async
-                        // boundary needed.
-                        let mut new_cfg = cfg.clone();
-                        new_cfg.ssh.host_key_fingerprint = Some(fp.clone());
-                        if let Some(path) = AppConfig::default_path() {
-                            if let Err(e) = new_cfg.save(&path) {
-                                warn!(error = %e, "could not persist TOFU fingerprint");
+            // Phase 1: update connection state and persist any TOFU
+            // fingerprint. Hold the lock only for the cheap mutations,
+            // never across an .await — list_users below would deadlock
+            // the egui render thread otherwise.
+            let handle_for_refresh = {
+                let mut s = state.lock().unwrap();
+                match r {
+                    Ok((handle, tofu)) => {
+                        s.conn = ConnState::Connected(handle.clone());
+                        if let Some(fp) = tofu {
+                            let mut new_cfg = cfg.clone();
+                            new_cfg.ssh.host_key_fingerprint = Some(fp.clone());
+                            if let Some(path) = AppConfig::default_path() {
+                                if let Err(e) = new_cfg.save(&path) {
+                                    warn!(error = %e, "could not persist TOFU fingerprint");
+                                }
                             }
+                            s.toast = Some((
+                                ToastKind::Success,
+                                format!("Connected. Recorded host key {fp}"),
+                            ));
+                        } else {
+                            s.toast = Some((ToastKind::Success, "Connected.".to_string()));
                         }
-                        s.toast = Some((
-                            ToastKind::Success,
-                            format!("Connected. Recorded host key {fp}"),
-                        ));
-                    } else {
-                        s.toast = Some((ToastKind::Success, "Connected.".to_string()));
+                        s.loading_users = true;
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        s.conn = ConnState::Failed(msg.clone());
+                        s.toast = Some((ToastKind::Error, format!("Couldn't connect: {msg}")));
+                        None
                     }
                 }
+            };
+            // Phase 2: on success, immediately fetch the user list so the
+            // sidebar isn't empty after a fresh connect. The egui frame
+            // already shows the green Connected pill so the user sees
+            // "Connected — Refreshing users…" rather than an empty list.
+            let Some(handle) = handle_for_refresh else {
+                return;
+            };
+            let users_r = pfsense::list_users(&handle).await;
+            let mut s = state.lock().unwrap();
+            s.loading_users = false;
+            match users_r {
+                Ok(u) => {
+                    let n = u.len();
+                    s.users = u;
+                    s.toast = Some((
+                        ToastKind::Success,
+                        format!("Connected. {n} users loaded."),
+                    ));
+                }
                 Err(e) => {
-                    let msg = format!("{e:#}");
-                    s.conn = ConnState::Failed(msg.clone());
-                    s.toast = Some((ToastKind::Error, format!("Couldn't connect: {msg}")));
+                    s.toast = Some((
+                        ToastKind::Error,
+                        format!("Connected but couldn't list users: {e:#}"),
+                    ));
                 }
             }
         });
