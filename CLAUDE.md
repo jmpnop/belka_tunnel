@@ -227,7 +227,7 @@ Match the working CLI command: `olgatimoshevskaia@aurora.celestialtech.io:22222`
 
 ### Known limitations / open items
 
-- **Host key verification is permissive** — accepts whatever the server presents. Acceptable for first iteration (server identity is bound to the DDNS hostname we control); before redistribution, persist + verify against a known fingerprint.
+- **Host key verification: trust-on-first-use** (commit `20b53ae`). First connect on a profile records the server's `SHA256:…` fingerprint into `host_key_fingerprint` in `config.json`; every subsequent connect requires an exact match. Mismatch → `Status::Disconnected("host key mismatch — …")` plus a one-shot macOS notification. The GUI editor's SSH section shows the recorded fingerprint as read-only with a "Forget" button (use after a legitimate server-key rotation; the daemon TOFUs the new key on the next connect).
 - **No autolaunch on login.** Add via launchd plist or macOS *Login Items* (Settings → General → Login Items → +).
 
 ## Olga's `~/.ssh/config` (recommended)
