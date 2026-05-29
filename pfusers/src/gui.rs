@@ -130,6 +130,30 @@ struct EditBuffer {
     // whatever's on the router so we don't accidentally touch it.
 }
 
+impl EditBuffer {
+    /// True if any editable field diverges from the server-side row.
+    /// Compared against the latest `users` snapshot (not against a frozen
+    /// 'original') so a successful Save → refresh cycle automatically
+    /// returns the form to a clean state.
+    ///
+    /// priv_list is compared as a SET — the toggle UI may push/pop in a
+    /// different order than the XML emitted, and order has no semantic
+    /// meaning for pfSense's priv evaluation.
+    fn is_dirty(&self, server: &PfUser) -> bool {
+        if self.descr != server.descr
+            || self.authorized_keys != server.authorized_keys
+            || self.disabled != server.disabled
+        {
+            return true;
+        }
+        let server_privs: std::collections::HashSet<&str> =
+            server.priv_list.iter().map(String::as_str).collect();
+        let buf_privs: std::collections::HashSet<&str> =
+            self.priv_list.iter().map(String::as_str).collect();
+        server_privs != buf_privs
+    }
+}
+
 #[derive(Default)]
 struct AddForm {
     name: String,
@@ -617,6 +641,22 @@ impl App {
                 };
                 let mut save_clicked = false;
                 let mut delete_clicked = false;
+                // Compute dirtiness once per frame, before the button render.
+                // Released the lock immediately so the rest of draw_central
+                // can re-acquire if it needs to (none currently does, but
+                // be defensive — we don't want this to grow into a deadlock
+                // when somebody adds a state read inside the central panel).
+                let dirty = {
+                    let users = &self.state.lock().unwrap().users;
+                    users
+                        .iter()
+                        .find(|u| u.name == buf.name)
+                        .map(|server| buf.is_dirty(server))
+                        // If the user disappeared from the server (deleted
+                        // out-of-band), enable Save so the resulting error
+                        // surfaces explicitly rather than being suppressed.
+                        .unwrap_or(true)
+                };
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(&buf.name)
@@ -625,9 +665,11 @@ impl App {
                             .strong(),
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if primary_button(ui, "  Save Changes  ").clicked() {
-                            save_clicked = true;
-                        }
+                        ui.add_enabled_ui(dirty, |ui| {
+                            if primary_button(ui, "  Save Changes  ").clicked() {
+                                save_clicked = true;
+                            }
+                        });
                     });
                 });
                 ui.add_space(18.0);
