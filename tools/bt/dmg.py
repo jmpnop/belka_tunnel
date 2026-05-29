@@ -116,7 +116,7 @@ def verify_dmg() -> None:
     """Sanity-check the latest produced DMG can be mounted and contains the app."""
     util.step("verify DMG")
     version = cargo_version()
-    dmg = util.BUNDLE.parent / f"BelkaTunnel-{version}.img"
+    dmg = util.BUNDLE.parent / f"BelkaTunnel-{version}.dmg"
     if not dmg.exists():
         util.fail(f"missing {dmg} — run `bt dmg` first")
         raise SystemExit(1)
