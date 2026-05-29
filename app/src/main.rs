@@ -320,7 +320,11 @@ fn main() -> Result<()> {
                     );
                 }
             } else if event.id == install_firefox_id {
-                if let Err(e) = firefox::install_or_update_async(notify_user) {
+                if let Err(e) = firefox::install_or_update_async(
+                    socks_host_for_firefox.clone(),
+                    socks_port_for_firefox,
+                    notify_user,
+                ) {
                     macos_alert("Couldn't start Firefox install", &format!("{e}"));
                 }
             } else if event.id == install_homebrew_id {

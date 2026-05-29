@@ -140,10 +140,15 @@ fn find_firefox_binary(bundle: &Path) -> Option<PathBuf> {
 // ---------- Install / Uninstall ----------
 
 /// Direct DMG install: download Firefox from Mozilla, mount, copy
-/// `Firefox.app` into `/Applications`, eject, clean up. No browser, no
-/// Homebrew, no Terminal. Runs in a background thread; returns immediately.
-/// Emits macOS notifications at each step.
-pub fn install_or_update_async(notify: impl Fn(&str, &str) + Send + 'static) -> Result<()> {
+/// `Firefox.app` into `/Applications`, eject, clean up. Also seeds the SOCKS5
+/// proxy preset into the БелкаТуннель profile AND into Firefox's main default
+/// profile so the tunnel is wired up automatically — no separate setup click.
+/// Runs in a background thread; returns immediately. Notifications at each step.
+pub fn install_or_update_async(
+    socks_host: String,
+    socks_port: u16,
+    notify: impl Fn(&str, &str) + Send + 'static,
+) -> Result<()> {
     info!("starting direct Firefox install");
     notify(
         "Downloading Firefox",
@@ -153,15 +158,71 @@ pub fn install_or_update_async(notify: impl Fn(&str, &str) + Send + 'static) -> 
         if let Err(e) = install_firefox_direct() {
             warn!(error = %e, "Firefox install failed");
             notify("Firefox install failed", &format!("{e}"));
-        } else {
-            info!("Firefox install succeeded");
-            notify(
-                "Firefox is ready",
-                "Installed to /Applications. Restart БелкаТуннель to refresh the menu.",
-            );
+            return;
         }
+        info!("Firefox install succeeded");
+
+        // Drop the enterprise policy into the bundle so EVERY Firefox launch
+        // — Dock, Spotlight, "Open a private window", anything — is locked to
+        // the SOCKS5 tunnel and the user cannot turn it off in Settings.
+        let bundle = PathBuf::from("/Applications/Firefox.app");
+        match install_firefox_policies(&bundle, &socks_host, socks_port) {
+            Ok(p) => info!(path = %p.display(), "policy installed"),
+            Err(e) => warn!(error = %e, "could not install enterprise policy"),
+        }
+
+        // Also seed the isolated БелкаТуннель profile so the menu item still
+        // gets private-browsing autostart + ifconfig.me homepage as a clean test.
+        if let Err(e) = FirefoxProfile::ensure(&socks_host, socks_port) {
+            warn!(error = %e, "could not seed isolated profile");
+        }
+
+        notify(
+            "Firefox is ready",
+            "Installed to /Applications. The SOCKS5 proxy is enforced by Firefox enterprise policy — every window goes through the tunnel and the setting is locked.",
+        );
     });
     Ok(())
+}
+
+/// Install a locked SOCKS5 proxy policy into the Firefox bundle's distribution
+/// folder. Once this file is in place, every Firefox launch with this `.app`
+/// (any profile, any window, normal or private) routes through our tunnel,
+/// and the user cannot disable it from the Settings UI (`Locked: true`).
+///
+/// Reference: https://mozilla.github.io/policy-templates/#proxy
+pub fn install_firefox_policies(bundle: &Path, socks_host: &str, socks_port: u16) -> Result<PathBuf> {
+    let dist_dir = bundle.join("Contents/Resources/distribution");
+    std::fs::create_dir_all(&dist_dir)
+        .with_context(|| format!("mkdir {}", dist_dir.display()))?;
+    let policies_path = dist_dir.join("policies.json");
+
+    let socks_addr = format!("{}:{}", socks_host, socks_port);
+    let json = format!(
+        r#"{{
+  "_comment": "Managed by БелкаТуннель. Forces all Firefox traffic through the SSH SOCKS5 tunnel.",
+  "policies": {{
+    "Proxy": {{
+      "Mode": "manual",
+      "SOCKSProxy": "{addr}",
+      "SOCKSVersion": 5,
+      "UseProxyForDNS": true,
+      "Locked": true
+    }},
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DontCheckDefaultBrowser": true,
+    "OverrideFirstRunPage": "https://ifconfig.me/",
+    "DisablePocket": true
+  }}
+}}
+"#,
+        addr = socks_addr
+    );
+    std::fs::write(&policies_path, json)
+        .with_context(|| format!("writing {}", policies_path.display()))?;
+    info!(path = %policies_path.display(), "installed Firefox enterprise policy (Locked SOCKS5)");
+    Ok(policies_path)
 }
 
 fn install_firefox_direct() -> Result<()> {
