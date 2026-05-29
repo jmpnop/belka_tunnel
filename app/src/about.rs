@@ -122,12 +122,24 @@ const ACCENT: Color32 = Color32::from_rgb(99, 124, 247);
 const PAD: f32 = 28.0;
 const IMAGE_FRACTION: f32 = 0.46;
 
-/// Number of recently-used JPEG frames we keep decoded into GPU textures.
-/// At 12fps that's roughly one second of look-back; new frames decode in
-/// <1ms each on modern hardware so the eviction churn is invisible. Drops
-/// the eager 33 MB GPU allocation that the old `Vec<TextureHandle>` did
-/// at startup — when the About window is never opened we pay nothing.
-const FRAME_CACHE_CAP: usize = 12;
+/// Lower bound on cache capacity. The actual cap is `max(this, frame count)`
+/// up to 256 — see `frame_cache_cap` below. We keep this constant only so
+/// the floor is centralized and clear; a directory with fewer frames than
+/// this still works because the cap clamps from both sides.
+///
+/// The previous design fixed the cap at 12 frames (~1 s at 12 fps). With
+/// the current 63 baked-in frames the animation cycles every 5.25 s, which
+/// meant every frame after the first second was a cache miss — we
+/// re-decoded the JPEG and re-uploaded a GPU texture 12 times a second for
+/// frames we had already decoded seconds earlier. Total throwaway work.
+/// Now we hold all frames once we've seen them; the eager allocation that
+/// the original Vec<TextureHandle> did at startup is still avoided because
+/// decoding is lazy — when the About window is never opened we pay nothing.
+const FRAME_CACHE_MIN_CAP: usize = 12;
+/// Hard ceiling so dropping 10 000 frames in the assets directory doesn't
+/// pin gigabytes of GPU memory. Tuned for the kind of looping animations
+/// we'd actually ship.
+const FRAME_CACHE_MAX_CAP: usize = 256;
 
 struct AboutApp {
     /// Raw JPEG bytes per frame, indexed; never mutated.
@@ -136,6 +148,11 @@ struct AboutApp {
     frame_cache: std::collections::HashMap<usize, egui::TextureHandle>,
     /// Indices in MRU order — oldest at the front, freshest at the back.
     frame_lru: std::collections::VecDeque<usize>,
+    /// Per-instance eviction threshold: `frame_bytes.len()` clamped into
+    /// `[FRAME_CACHE_MIN_CAP, FRAME_CACHE_MAX_CAP]`. For the typical case
+    /// where it ≥ frame count, eviction never runs after the first cycle
+    /// and the animation is hit-only.
+    cache_cap: usize,
     started: std::time::Instant,
     first_frame: bool,
     expanded_credits: bool,
@@ -158,14 +175,18 @@ impl AboutApp {
         frame_files.sort_by_key(|f| f.path().to_string_lossy().to_string());
         let frame_bytes: Vec<&'static [u8]> =
             frame_files.into_iter().map(|f| f.contents()).collect();
+        let cache_cap = frame_bytes
+            .len()
+            .clamp(FRAME_CACHE_MIN_CAP, FRAME_CACHE_MAX_CAP);
         tracing::info!(
             count = frame_bytes.len(),
-            cache_cap = FRAME_CACHE_CAP,
+            cache_cap,
             "indexed animation frames (lazy decode)"
         );
 
         Self {
             frame_bytes,
+            cache_cap,
             frame_cache: std::collections::HashMap::new(),
             frame_lru: std::collections::VecDeque::new(),
             started: std::time::Instant::now(),
@@ -196,7 +217,7 @@ impl AboutApp {
         );
         self.frame_cache.insert(idx, handle.clone());
         self.frame_lru.push_back(idx);
-        while self.frame_cache.len() > FRAME_CACHE_CAP {
+        while self.frame_cache.len() > self.cache_cap {
             if let Some(oldest) = self.frame_lru.pop_front() {
                 self.frame_cache.remove(&oldest);
             }
