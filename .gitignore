@@ -3,6 +3,12 @@
 .env.*
 !.env.example
 
+# Python (uv harness)
+__pycache__/
+*.pyc
+.venv/
+tools/.venv/
+
 # macOS
 .DS_Store
 ._*
