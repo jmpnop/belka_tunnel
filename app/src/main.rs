@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
@@ -145,11 +145,55 @@ fn main() -> Result<()> {
         None,
     );
 
+    // ---------- Firefox submenu (dynamic on Firefox state) ----------
+    let firefox_info = firefox::detect();
+    let firefox_submenu = Submenu::new("Browse via tunnel (Firefox)", true);
+
+    let ff_status_label = match (&firefox_info.path, &firefox_info.version) {
+        (Some(p), Some(v)) => format!("Firefox {} — {}", v, p.display()),
+        (Some(p), None) => format!("Firefox installed at {}", p.display()),
+        (None, _) => "Firefox is not installed".to_string(),
+    };
+    let firefox_status_item = MenuItem::new(ff_status_label, false, None);
+    firefox_submenu.append(&firefox_status_item)?;
+    firefox_submenu.append(&PredefinedMenuItem::separator())?;
+
     let open_firefox_item = MenuItem::new(
-        "Browse the web through this tunnel (Firefox, private)",
-        true,
+        "Open a private window (proxy preset)",
+        firefox_info.installed(),
         None,
     );
+    let install_firefox_item = MenuItem::new(
+        if firefox_info.installed() {
+            "Reinstall / update Firefox via Homebrew"
+        } else {
+            "Install Firefox via Homebrew"
+        },
+        firefox_info.brew.is_some(),
+        None,
+    );
+    let uninstall_firefox_item = MenuItem::new(
+        "Uninstall Firefox…",
+        firefox_info.installed(),
+        None,
+    );
+    let firefox_download_item =
+        MenuItem::new("Open Mozilla download page in browser", true, None);
+    let firefox_brew_help_item = MenuItem::new(
+        "Install Homebrew first (opens brew.sh)",
+        firefox_info.brew.is_none(),
+        None,
+    );
+
+    firefox_submenu.append(&open_firefox_item)?;
+    firefox_submenu.append(&PredefinedMenuItem::separator())?;
+    firefox_submenu.append(&install_firefox_item)?;
+    if firefox_info.brew.is_none() {
+        firefox_submenu.append(&firefox_brew_help_item)?;
+    }
+    firefox_submenu.append(&uninstall_firefox_item)?;
+    firefox_submenu.append(&PredefinedMenuItem::separator())?;
+    firefox_submenu.append(&firefox_download_item)?;
     let edit_config_item = MenuItem::new("Edit Configuration…", true, None);
     let reveal_data_item = MenuItem::new("Reveal Data Folder in Finder", true, None);
     let open_logs_item = MenuItem::new("Open Log File", true, None);
@@ -168,7 +212,7 @@ fn main() -> Result<()> {
     menu.append(&listen_all_item)?;
     menu.append(&hide_dot_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
-    menu.append(&open_firefox_item)?;
+    menu.append(&firefox_submenu)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&edit_config_item)?;
     menu.append(&reveal_data_item)?;
@@ -214,6 +258,10 @@ fn main() -> Result<()> {
     let listen_all_id = listen_all_item.id().clone();
     let hide_dot_id = hide_dot_item.id().clone();
     let status_toggle_id = status_item.id().clone();
+    let install_firefox_id = install_firefox_item.id().clone();
+    let uninstall_firefox_id = uninstall_firefox_item.id().clone();
+    let firefox_download_id = firefox_download_item.id().clone();
+    let firefox_brew_help_id = firefox_brew_help_item.id().clone();
     let mut hide_status_dot = file.hide_status_dot;
     let socks_host_for_firefox = if profile.socks.listen_addr == "0.0.0.0" {
         "127.0.0.1".to_string()
@@ -263,11 +311,41 @@ fn main() -> Result<()> {
                     macos_alert(
                         "Couldn't launch Firefox",
                         &format!(
-                            "{e}\n\nInstall Firefox from https://www.mozilla.org/firefox/ \
-                             or check that ~/.ssh/id_ed25519 is readable."
+                            "{e}\n\nUse the Firefox submenu → Install Firefox to fetch it."
                         ),
                     );
                 }
+            } else if event.id == install_firefox_id {
+                let result = firefox::install_or_update_async(notify_user);
+                if let Err(e) = result {
+                    macos_alert(
+                        "Couldn't start Firefox install",
+                        &format!(
+                            "{e}\n\nInstall Homebrew first (https://brew.sh), \
+                             or download Firefox manually from \
+                             https://www.mozilla.org/firefox/"
+                        ),
+                    );
+                }
+            } else if event.id == uninstall_firefox_id {
+                if macos_confirm(
+                    "Uninstall Firefox?",
+                    "This will remove Firefox.app from /Applications. \
+                     Your tunnel-private Firefox profile (preferences, history, \
+                     bookmarks for that profile) will stay in БелкаТуннель's \
+                     data folder.",
+                    "Uninstall",
+                ) {
+                    if let Err(e) = firefox::uninstall_async(notify_user) {
+                        macos_alert("Couldn't uninstall Firefox", &format!("{e}"));
+                    }
+                }
+            } else if event.id == firefox_download_id {
+                firefox::open_download_page();
+            } else if event.id == firefox_brew_help_id {
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .arg("https://brew.sh")
+                    .spawn();
             } else if event.id == edit_config_id {
                 spawn_gui();
             } else if event.id == reveal_data_id {
@@ -465,12 +543,49 @@ fn update_listen_addr(config_path: &std::path::Path, new_addr: &str) -> Result<(
 }
 
 fn macos_alert(title: &str, body: &str) {
-    // Escape any double quotes in the strings for AppleScript safety.
     let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         r#"display alert "{}" message "{}" as critical buttons {{"OK"}} default button "OK""#,
         esc(title),
         esc(body)
+    );
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(&script)
+        .spawn();
+}
+
+/// Modal Yes/No confirmation. Returns true if the user clicked `action_label`.
+/// Default + cancel button is "Cancel".
+fn macos_confirm(title: &str, body: &str, action_label: &str) -> bool {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"set r to display alert "{}" message "{}" buttons {{"Cancel", "{}"}} default button "Cancel" cancel button "Cancel" as critical
+return button returned of r"#,
+        esc(title),
+        esc(body),
+        esc(action_label)
+    );
+    let out = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(&script)
+        .output();
+    match out {
+        Ok(o) => {
+            let answer = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            answer == action_label
+        }
+        Err(_) => false,
+    }
+}
+
+/// Non-modal user notification — appears in the Notification Center.
+fn notify_user(title: &str, body: &str) {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"display notification "{}" with title "{}""#,
+        esc(body),
+        esc(title)
     );
     let _ = std::process::Command::new("/usr/bin/osascript")
         .arg("-e")
