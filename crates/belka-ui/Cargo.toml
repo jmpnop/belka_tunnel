@@ -1,0 +1,13 @@
+[package]
+name = "belka-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Zed-inspired dark theme + egui widgets shared between BelkaTunnel and pfUsers"
+
+[lib]
+name = "belka_ui"
+path = "src/lib.rs"
+
+[dependencies]
+eframe = { version = "0.30", default-features = false, features = ["default_fonts", "glow"] }
+tracing = "0.1"

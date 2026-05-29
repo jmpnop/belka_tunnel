@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "app",
+    "crates/belka-ui",
+    "pfusers",
+]
+
+# Per-crate Cargo.toml's keep their own [dependencies] sections for now —
+# promoting to [workspace.dependencies] is a follow-up once we know the
+# shared-version pinning matters in practice.
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

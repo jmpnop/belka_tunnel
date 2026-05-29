@@ -14,9 +14,11 @@ tools/.venv/
 ._*
 
 # Rust build
+target/
 app/target/
 app/dist/
 app/icon-work/
+pfusers/dist/
 
 # Local config / test files
 app/test-config.toml
