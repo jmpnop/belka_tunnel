@@ -59,6 +59,58 @@ def verify_bundle() -> None:
     util.ok("bundle verification passed")
 
 
+def verify_pfusers_bundle() -> None:
+    """Sanity-check the pfUsers.app bundle. Mirrors verify_bundle() but for
+    the windowed admin app (no LSUIElement, distinct identifier)."""
+    util.step("verify pfUsers bundle")
+    from .build import PFUSERS_BUNDLE
+
+    bundle = PFUSERS_BUNDLE
+    if not bundle.exists():
+        util.fail(f"missing bundle {bundle}")
+        raise SystemExit(1)
+
+    info_plist = bundle / "Contents" / "Info.plist"
+    binary = bundle / "Contents" / "MacOS" / "pfusers"
+    code_sig = bundle / "Contents" / "_CodeSignature" / "CodeResources"
+
+    required = {info_plist: "Info.plist", binary: "binary"}
+    for path, label in required.items():
+        if not path.exists():
+            util.fail(f"missing {label} at {path}")
+            raise SystemExit(1)
+    util.ok("required files present")
+
+    info = plistlib.loads(info_plist.read_bytes())
+    expected = {
+        "CFBundleExecutable": "pfusers",
+        "CFBundleIdentifier": "io.celestialtech.pfUsers",
+        "CFBundleName": "pfUsers",
+    }
+    for key, want in expected.items():
+        got = info.get(key)
+        if got != want:
+            util.fail(f"Info.plist[{key}] expected {want!r}, got {got!r}")
+            raise SystemExit(1)
+    # LSUIElement must be absent or false — pfUsers is a windowed app.
+    if info.get("LSUIElement"):
+        util.fail("LSUIElement set on pfUsers — should be a regular windowed app")
+        raise SystemExit(1)
+    util.ok(f"Info.plist: {info.get('CFBundleShortVersionString')}")
+
+    r = util.run(["file", str(binary)], capture=True)
+    util.console.print(f"  arch: {r.stdout.strip().split(': ', 1)[1]}")
+
+    cs = util.run(["codesign", "--verify", "--strict", str(bundle)], check=False)
+    if cs.code != 0:
+        util.warn("codesign --verify failed (ad-hoc sign may need re-run)")
+    else:
+        util.ok("codesign valid")
+
+    _ = code_sig  # presence is informational; ad-hoc signing creates it
+    util.ok("pfUsers bundle verification passed")
+
+
 def verify_policies() -> None:
     """Validate the Firefox policies.json (if Firefox is installed)."""
     util.step("verify Firefox policies")

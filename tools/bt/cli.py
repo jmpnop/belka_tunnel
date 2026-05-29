@@ -59,6 +59,18 @@ def universal() -> None:
     build.build_universal()
 
 
+@app.command(name="bundle-pfusers")
+def cmd_bundle_pfusers(
+    universal: bool = typer.Option(
+        False,
+        "--universal",
+        help="Consume target/universal/release/pfusers (run `bt universal-pfusers` first)",
+    ),
+) -> None:
+    """Build release + assemble pfusers/dist/pfUsers.app."""
+    build.bundle_pfusers(universal=universal)
+
+
 # ---------- Lint + test ----------
 
 
@@ -114,6 +126,12 @@ def verify_policies() -> None:
 def verify_dmg() -> None:
     """Mount the latest DMG and check it contains the .app + /Applications link."""
     dmg.verify_dmg()
+
+
+@verify_app.command("pfusers")
+def verify_pfusers() -> None:
+    """Sanity-check the pfUsers.app bundle: required files, Info.plist keys, codesign."""
+    verify.verify_pfusers_bundle()
 
 
 # ---------- DMG ----------

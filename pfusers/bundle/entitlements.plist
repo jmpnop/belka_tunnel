@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Only entitlement pfUsers needs: an outbound TCP socket to talk to
+         the router on admin@host:22222. No filesystem access beyond
+         ProjectDirs, no microphone/camera, no keychain. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

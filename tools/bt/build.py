@@ -57,6 +57,29 @@ def bundle(universal: bool = False) -> None:
     util.ok(f"bundle ready at {util.BUNDLE}")
 
 
+PFUSERS_DIR = util.REPO_ROOT / "pfusers"
+PFUSERS_BUNDLE = PFUSERS_DIR / "dist" / "pfUsers.app"
+
+
+def bundle_pfusers(universal: bool = False) -> None:
+    """Build release + assemble pfusers/dist/pfUsers.app.
+
+    Mirrors `bundle()` but targets the pfusers crate. Built artifacts live
+    under the WORKSPACE target dir (workspace-target/release/pfusers), not
+    the per-crate one.
+    """
+    env: dict[str, str] = {}
+    if universal:
+        env["USE_UNIVERSAL"] = "1"
+    else:
+        util.run(
+            ["cargo", "build", "--release", "-p", "pfusers"],
+            cwd=util.REPO_ROOT,
+        )
+    util.run(["bash", "./build-app.sh"], cwd=PFUSERS_DIR, env=env)
+    util.ok(f"pfUsers bundle ready at {PFUSERS_BUNDLE}")
+
+
 def build_universal() -> None:
     """Cross-compile arm64 + x86_64, lipo into a fat binary."""
     targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

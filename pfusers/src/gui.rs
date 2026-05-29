@@ -92,6 +92,11 @@ struct App {
     delete_confirm_text: String,
     show_settings: bool,
     settings_form: AppConfig,
+    /// Username whose password we're resetting. `Some` opens the modal.
+    reset_password_target: Option<String>,
+    /// Buffer for the password input inside the reset modal. Cleared on
+    /// open/close — never lingers in memory longer than necessary.
+    reset_password_buf: String,
 }
 
 /// Anything the async tasks update needs to live behind a Mutex so the egui
@@ -122,7 +127,15 @@ struct EditBuffer {
     authorized_keys: String,
     priv_list: Vec<String>,
     disabled: bool,
-    groups: Vec<String>,
+    /// Text representation of group memberships — newline-separated names.
+    /// Edited as a free-form text area in the GUI; on save, parsed into
+    /// trimmed non-empty lines and sent as `Some(...)` to pfsense::update_user
+    /// (authoritative, so an empty buffer means "strip all memberships").
+    groups_text: String,
+    /// True when the user has actually touched the groups field. We send
+    /// `Some(parsed)` only in that case — otherwise `None`, which preserves
+    /// existing memberships untouched (the audit's "default safe" path).
+    groups_dirty: bool,
 }
 
 #[derive(Default)]
@@ -157,6 +170,8 @@ impl App {
             delete_confirm_text: String::new(),
             show_settings: false,
             settings_form: cfg,
+            reset_password_target: None,
+            reset_password_buf: String::new(),
         };
         app.spawn_connect();
         app
@@ -248,16 +263,30 @@ impl App {
             s.pending_op = Some(format!("Saving {}…", buf.name));
         }
         self.rt.spawn(async move {
+            // Only ship `groups` if the user actually edited the field. An
+            // untouched field sends None so existing memberships survive —
+            // the audit's "default safe" path. A touched-but-empty field
+            // means the user deliberately wants the user stripped from
+            // every group (except `all`, which pfsense::update_user re-adds).
+            let groups_payload: Option<Vec<String>> = if buf.groups_dirty {
+                Some(
+                    buf.groups_text
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                )
+            } else {
+                None
+            };
             let req = pfsense::UpdateUserReq {
                 name: &buf.name,
                 descr: Some(buf.descr.as_str()),
                 priv_list: Some(buf.priv_list.clone()),
                 authorized_keys: Some(buf.authorized_keys.as_str()),
                 disabled: Some(buf.disabled),
-                // Audit #4: don't touch group memberships until a Groups UI
-                // exists. Sending None here preserves whatever pfSense's
-                // existing membership state was.
-                groups: None,
+                groups: groups_payload,
             };
             let r = pfsense::update_user(&handle, req).await;
             // Refresh after, so the UI reflects the canonical server state.
@@ -352,6 +381,40 @@ impl App {
             }
         });
     }
+
+    fn spawn_set_password(&self, name: String, password: String) {
+        let handle = match &self.state.lock().unwrap().conn {
+            ConnState::Connected(h) => h.clone(),
+            _ => return,
+        };
+        let state = self.state.clone();
+        {
+            let mut s = state.lock().unwrap();
+            s.pending_op = Some(format!("Resetting password for {name}…"));
+        }
+        let name_for_msg = name.clone();
+        self.rt.spawn(async move {
+            let r = pfsense::set_password(&handle, &name, &password).await;
+            // Zeroise our copy of the password as soon as the SSH call returns.
+            // Not cryptographic zeroisation (Rust can't guarantee that without
+            // a `secrecy`/`zeroize` crate), but it does drop the heap buffer
+            // promptly rather than waiting for the closure to be dropped.
+            drop(password);
+            let mut s = state.lock().unwrap();
+            s.pending_op = None;
+            match r {
+                Ok(()) => {
+                    s.toast = Some((
+                        ToastKind::Success,
+                        format!("Password reset for {name_for_msg}."),
+                    ));
+                }
+                Err(e) => {
+                    s.toast = Some((ToastKind::Error, format!("Password reset failed: {e:#}")));
+                }
+            }
+        });
+    }
 }
 
 impl eframe::App for App {
@@ -377,6 +440,9 @@ impl eframe::App for App {
         }
         if self.show_settings {
             self.draw_settings_modal(ctx);
+        }
+        if self.reset_password_target.is_some() {
+            self.draw_reset_password_modal(ctx);
         }
     }
 }
@@ -525,7 +591,12 @@ impl App {
                                 authorized_keys: u.authorized_keys.clone(),
                                 priv_list: u.priv_list.clone(),
                                 disabled: u.disabled,
-                                groups: u.groups.clone(),
+                                // Pre-fill the groups text from server state but
+                                // mark NOT dirty — the user hasn't expressed a
+                                // change yet, so a Save without touching the
+                                // groups field preserves the existing memberships.
+                                groups_text: u.groups.join("\n"),
+                                groups_dirty: false,
                             });
                         }
                         ui.add_space(6.0);
@@ -551,6 +622,7 @@ impl App {
                 };
                 let mut save_clicked = false;
                 let mut delete_clicked = false;
+                let mut reset_password_clicked = false;
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(&buf.name)
@@ -628,6 +700,64 @@ impl App {
                     });
                     ui.add_space(14.0);
 
+                    card(ui, |ui| {
+                        section_title(
+                            ui,
+                            "Group memberships",
+                            Some(
+                                "One group name per line. Saving an EMPTY field strips the user \
+                                 from every group except 'all'. Leaving the field UNTOUCHED preserves \
+                                 current memberships.",
+                            ),
+                        );
+                        let resp = ui.add(
+                            egui::TextEdit::multiline(&mut buf.groups_text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_rows(4)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("admins\nvpn-users\n"),
+                        );
+                        if resp.changed() {
+                            buf.groups_dirty = true;
+                        }
+                        let dirty_marker = if buf.groups_dirty { " · edited" } else { "" };
+                        let group_count = buf
+                            .groups_text
+                            .lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .count();
+                        ui.label(
+                            RichText::new(format!("{group_count} groups{dirty_marker}"))
+                                .color(theme::TEXT_FAINT)
+                                .size(11.0),
+                        );
+                        ui.add_space(4.0);
+                        if ghost_button(ui, "  Reset to server value  ").clicked() {
+                            // Re-fetch from the current user-list snapshot.
+                            let users = self.state.lock().unwrap().users.clone();
+                            if let Some(u) = users.iter().find(|u| u.name == buf.name) {
+                                buf.groups_text = u.groups.join("\n");
+                                buf.groups_dirty = false;
+                            }
+                        }
+                    });
+                    ui.add_space(14.0);
+
+                    card(ui, |ui| {
+                        section_title(
+                            ui,
+                            "Password",
+                            Some(
+                                "Resets the bcrypt-hash field. The user's existing OS-level shell \
+                                 password is left alone — pfSense's web UI auth is what gets updated.",
+                            ),
+                        );
+                        if ghost_button(ui, "  Reset password…  ").clicked() {
+                            reset_password_clicked = true;
+                        }
+                    });
+                    ui.add_space(14.0);
+
                     Frame::none()
                         .fill(theme::DANGER.linear_multiply(0.08))
                         .stroke(Stroke::new(1.0, theme::DANGER.linear_multiply(0.5)))
@@ -662,7 +792,8 @@ impl App {
                             authorized_keys: b.authorized_keys.clone(),
                             priv_list: b.priv_list.clone(),
                             disabled: b.disabled,
-                            groups: b.groups.clone(),
+                            groups_text: b.groups_text.clone(),
+                            groups_dirty: b.groups_dirty,
                         };
                         self.spawn_save_user(clone);
                     }
@@ -670,6 +801,10 @@ impl App {
                 if delete_clicked {
                     self.confirm_delete = self.selected.clone();
                     self.delete_confirm_text.clear();
+                }
+                if reset_password_clicked {
+                    self.reset_password_target = self.selected.clone();
+                    self.reset_password_buf.clear();
                 }
             });
     }
@@ -901,6 +1036,83 @@ impl App {
             self.delete_confirm_text.clear();
             self.selected = None;
             self.edit_buffer = None;
+        }
+    }
+
+    fn draw_reset_password_modal(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.reset_password_target.clone() else {
+            return;
+        };
+        let mut cancel = false;
+        let mut submit = false;
+        egui::Window::new("Reset Password")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                Frame::none()
+                    .fill(theme::PANEL)
+                    .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+                    .rounding(Rounding::same(10.0))
+                    .inner_margin(Margin::same(22.0)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(420.0);
+                ui.label(
+                    RichText::new(format!("Reset password for \"{target}\""))
+                        .color(theme::TEXT_PRIMARY)
+                        .size(15.0)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(
+                        "Writes a new bcrypt-hash to config.xml (cost=10). Take effect on \
+                         next web-UI login. The user's existing SSH key-based access is \
+                         unaffected.",
+                    )
+                    .color(theme::TEXT_MUTED)
+                    .size(11.5),
+                );
+                ui.add_space(12.0);
+                field(ui, "New password", None, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.reset_password_buf)
+                            .password(true)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ghost_button(ui, "  Cancel  ").clicked() {
+                        cancel = true;
+                    }
+                    ui.add_space(8.0);
+                    let valid = !self.reset_password_buf.is_empty();
+                    if ui
+                        .add_enabled(
+                            valid,
+                            egui::Button::new(
+                                RichText::new("  Reset Password  ")
+                                    .color(Color32::WHITE)
+                                    .strong(),
+                            )
+                            .fill(theme::ACCENT)
+                            .rounding(Rounding::same(8.0)),
+                        )
+                        .clicked()
+                    {
+                        submit = true;
+                    }
+                });
+            });
+        if cancel {
+            self.reset_password_target = None;
+            self.reset_password_buf.clear();
+        }
+        if submit {
+            let pw = std::mem::take(&mut self.reset_password_buf);
+            self.spawn_set_password(target, pw);
+            self.reset_password_target = None;
         }
     }
 
