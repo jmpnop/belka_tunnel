@@ -37,6 +37,10 @@ muda = "0.19"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 include_dir = "0.7"
 
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

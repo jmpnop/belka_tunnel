@@ -29,7 +29,7 @@ def bench(socks_port: int = SOCKS_PORT_DEFAULT) -> None:
     util.step("tunnel benchmark")
     proxy = proxy_url(socks_port)
 
-    with httpx.Client(proxies=proxy, http2=True) as cl:
+    with httpx.Client(proxy=proxy, http2=True) as cl:
         # A) Throughput — single 10 MB GET
         util.console.print("\n[bold]A) Throughput (10 MB single stream)[/bold]")
         dt, n = _get(cl, "/__down?bytes=10485760")
@@ -71,17 +71,21 @@ def bench(socks_port: int = SOCKS_PORT_DEFAULT) -> None:
     durations: list[float] = []
 
     def one(_: int) -> float:
-        with httpx.Client(proxies=proxy) as c:
+        with httpx.Client(proxy=proxy) as c:
             t0 = time.monotonic()
             c.get(f"{BASE}/__down?bytes=204800", timeout=30)
             return time.monotonic() - t0
 
     t0 = time.monotonic()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
-        for d in pool.map(one, range(20)):
-            durations.append(d)
+    n = 20
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+        durations = list(pool.map(one, range(n)))
     wall = time.monotonic() - t0
-    p50, p95 = (durations[len(durations) // 2], sorted(durations)[18])
+    # Sort before indexing — nearest-rank percentile on the actual distribution
+    # rather than on completion order.
+    sorted_d = sorted(durations)
+    p50 = sorted_d[max(0, int(0.50 * n) - 1)]
+    p95 = sorted_d[max(0, int(0.95 * n) - 1)]
     util.console.print(
         f"  wall {wall:.2f}s · per-stream p50 {p50 * 1000:.0f}ms  p95 {p95 * 1000:.0f}ms"
     )

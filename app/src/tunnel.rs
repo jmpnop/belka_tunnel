@@ -7,7 +7,7 @@ use russh::ChannelMsg;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -15,14 +15,6 @@ pub enum Status {
     Connected,
     Disconnected(String),
     Disabled,
-}
-
-/// Legacy handle returned by the unused `spawn()` helper; kept for
-/// API-compat with any future caller. The internal channel receiver isn't
-/// currently observed.
-#[allow(dead_code)]
-pub struct Tunnel {
-    pub status_rx: watch::Receiver<Status>,
 }
 
 /// Tunnel on/off + change-notification rolled into one. Backed by a
@@ -50,33 +42,30 @@ impl Control {
     pub fn is_enabled(&self) -> bool {
         *self.rx.borrow()
     }
-    /// Wait for any change in the enabled flag. Does not lose wakeups.
-    pub async fn changed(&self) {
-        let mut rx = self.rx.clone();
-        let _ = rx.changed().await;
+    /// Subscribe to changes. Callers hold the returned receiver across their
+    /// loop iterations — that way the "seen version" advances correctly and
+    /// no `set_enabled` ever falls between two `.changed().await` calls.
+    /// Cloning a `watch::Receiver` resets the seen version to the latest
+    /// value, which is exactly the lost-wakeup we want to avoid in hot loops.
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
+        self.rx.clone()
     }
-}
-
-#[allow(dead_code)]
-pub fn spawn(config: Arc<Config>) -> Tunnel {
-    let (tx, rx) = watch::channel(Status::Connecting);
-    tokio::spawn(run_forever(config, tx, Control::new(true)));
-    Tunnel { status_rx: rx }
 }
 
 pub async fn run_forever(config: Arc<Config>, status: watch::Sender<Status>, control: Control) {
     let mut backoff = Duration::from_secs(config.reconnect.initial_backoff_secs);
     let max_backoff = Duration::from_secs(config.reconnect.max_backoff_secs);
+    // Long-lived receiver — its "seen version" advances correctly across the
+    // disabled-wait and the reconnect-sleep, so a set_enabled() that races
+    // either of those is captured by the next .changed().await.
+    let mut ctl_rx = control.subscribe();
 
     loop {
-        // Wait while disabled. Using watch::changed() means a set_enabled(true)
-        // call that races our check won't be lost — it will be the next value
-        // returned by changed().
         if !control.is_enabled() {
             let _ = status.send(Status::Disabled);
             info!("tunnel disabled; waiting for re-enable");
             while !control.is_enabled() {
-                control.changed().await;
+                let _ = ctl_rx.changed().await;
             }
             backoff = Duration::from_secs(config.reconnect.initial_backoff_secs);
             continue;
@@ -112,7 +101,7 @@ pub async fn run_forever(config: Arc<Config>, status: watch::Sender<Status>, con
         info!(seconds = backoff.as_secs(), "sleeping before reconnect");
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
-            _ = control.changed() => {}
+            _ = ctl_rx.changed() => {}
         }
         backoff = std::cmp::min(
             max_backoff,
@@ -183,6 +172,7 @@ async fn run_one_session(
         let handle = handle.clone();
         let dead = dead.clone();
         let control = control.clone();
+        let mut ctl_rx = control.subscribe();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -198,7 +188,7 @@ async fn run_one_session(
                             break;
                         }
                     }
-                    _ = control.changed() => {
+                    _ = ctl_rx.changed() => {
                         if !control.is_enabled() {
                             info!("tunnel disabled by user; signalling SOCKS to stop");
                             dead.notify_waiters();
@@ -288,16 +278,51 @@ where
 
 pub type ClientHandle = Arc<Handle<ClientHandler>>;
 
-impl Drop for ClientHandler {
-    fn drop(&mut self) {
-        // nothing
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[allow(dead_code)]
-async fn shutdown(handle: Handle<ClientHandler>) {
-    let _ = handle
-        .disconnect(russh::Disconnect::ByApplication, "shutdown", "en")
-        .await
-        .map_err(|e| error!(error = %e, "disconnect"));
+    #[test]
+    fn control_initial_value() {
+        assert!(Control::new(true).is_enabled());
+        assert!(!Control::new(false).is_enabled());
+    }
+
+    #[tokio::test]
+    async fn control_subscribe_observes_change() {
+        let ctl = Control::new(false);
+        let mut rx = ctl.subscribe();
+        let waiter = tokio::spawn(async move {
+            rx.changed().await.unwrap();
+            *rx.borrow()
+        });
+        // Let waiter register.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        ctl.set_enabled(true);
+        let v = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter timed out")
+            .expect("waiter panicked");
+        assert!(v);
+        assert!(ctl.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn control_no_lost_wakeup_on_rapid_flip() {
+        // The bug we're guarding against: a subscriber that polled is_enabled()
+        // and was about to await .changed() must still observe a flip that
+        // happened in between. With a long-lived watch::Receiver from
+        // subscribe(), the next .changed().await captures any subsequent change.
+        let ctl = Control::new(true);
+        let mut rx = ctl.subscribe();
+        // Pretend we polled is_enabled() here.
+        assert!(ctl.is_enabled());
+        // Now flip BEFORE the subscriber awaits — historically a lost wakeup.
+        ctl.set_enabled(false);
+        // The receiver should observe the flip on its next call.
+        let _ = tokio::time::timeout(Duration::from_secs(1), rx.changed())
+            .await
+            .expect("changed() lost the wakeup");
+        assert!(!*rx.borrow());
+    }
 }

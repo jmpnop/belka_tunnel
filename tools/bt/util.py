@@ -31,7 +31,7 @@ LOG_DIR = (
     / "io.celestialtech.BelkaTunnel"
 )
 LOG_FILE = LOG_DIR / "logs" / "proxy-tunnel.log"
-CONFIG_FILE = LOG_DIR / "config.json"
+CONFIG_FILE = LOG_DIR / "config.json"  # the app's persisted config (JSON, not TOML)
 
 
 # ---------- Process exec ----------
@@ -147,20 +147,22 @@ def kill_app() -> None:
                 pass
 
 
-def wait_for_listener(port: int, timeout: float = 10.0) -> bool:
-    """Block until the given local TCP port is in LISTEN state, or timeout."""
-    import psutil
+def wait_for_listener(port: int, host: str = "127.0.0.1", timeout: float = 10.0) -> bool:
+    """Block until something is accept()ing on `host:port`, or timeout.
+
+    Uses a TCP-connect probe instead of walking psutil.net_connections — that
+    is O(all-tcp-on-this-mac) per tick and needs accessibility privileges on
+    recent macOS.
+    """
+    import socket
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        for conn in psutil.net_connections(kind="tcp"):
-            if (
-                conn.status == "LISTEN"
-                and conn.laddr
-                and conn.laddr.port == port
-            ):
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
                 return True
-        time.sleep(0.1)
+        except OSError:
+            time.sleep(0.1)
     return False
 
 

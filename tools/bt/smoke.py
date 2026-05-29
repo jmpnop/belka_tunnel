@@ -4,13 +4,34 @@ from __future__ import annotations
 
 import time
 
+import subprocess
+
 import httpx
 
 from . import util
 
 
 SOCKS_PORT_DEFAULT = 1081  # matches Pasha's pasha-lan config
-EXPECTED_EXIT_IP = "173.77.254.243"
+DDNS_HOST = "aurora.celestialtech.io"
+
+
+def expected_exit_ip() -> str:
+    """Resolve the tunnel's expected exit IP from the DDNS A-record.
+
+    Hardcoding Pasha's WAN IP would false-fail every time his ISP rotates
+    the lease — the whole DDNS setup exists precisely so the IP can change.
+    """
+    r = subprocess.run(
+        ["dig", "+short", DDNS_HOST, "@1.1.1.1"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    ip = r.stdout.strip().splitlines()
+    if not ip or not ip[-1]:
+        raise SystemExit(f"DDNS A-record for {DDNS_HOST} is empty")
+    return ip[-1]
 
 
 def smoke(socks_port: int = SOCKS_PORT_DEFAULT) -> None:
@@ -42,12 +63,12 @@ def smoke(socks_port: int = SOCKS_PORT_DEFAULT) -> None:
     # Route a real HTTPS request through the tunnel.
     proxy = f"socks5h://127.0.0.1:{socks_port}"
     util.console.print(f"[dim]GET https://ifconfig.me through {proxy}[/dim]")
+    expected_ip = expected_exit_ip()
+    util.console.print(f"[dim]expected exit IP from DDNS: {expected_ip}[/dim]")
     try:
-        r = httpx.get(
-            "https://ifconfig.me",
-            timeout=10,
-            proxies=proxy,
-        )
+        # httpx removed the `proxies=` parameter in 0.28; `proxy=` is the
+        # current form and works back to 0.26.
+        r = httpx.get("https://ifconfig.me", timeout=10, proxy=proxy)
     except Exception as e:
         util.fail(f"tunnel request failed: {e}")
         raise SystemExit(1)
@@ -57,8 +78,8 @@ def smoke(socks_port: int = SOCKS_PORT_DEFAULT) -> None:
         raise SystemExit(1)
 
     exit_ip = r.text.strip()
-    if exit_ip != EXPECTED_EXIT_IP:
-        util.fail(f"tunnel exit IP {exit_ip!r} != expected {EXPECTED_EXIT_IP!r}")
+    if exit_ip != expected_ip:
+        util.fail(f"tunnel exit IP {exit_ip!r} != DDNS A-record {expected_ip!r}")
         raise SystemExit(1)
     util.ok(f"tunnel exit IP = {exit_ip}")
     util.ok("smoke test passed")

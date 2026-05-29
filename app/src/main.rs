@@ -25,6 +25,16 @@ static HOMEBREW_INSTALL_BUSY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static RELAUNCH_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// RAII: clears an AtomicBool when dropped. Survives panics inside a worker
+/// thread so a `panic!` mid-install can't permanently disable the menu item.
+pub struct BusyFlagGuard(pub &'static std::sync::atomic::AtomicBool);
+
+impl Drop for BusyFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 const BT_GREEN_PNG: &[u8] = include_bytes!("../assets/bt-green.png");
 const BT_ORANGE_PNG: &[u8] = include_bytes!("../assets/bt-orange.png");
 const BT_RED_PNG: &[u8] = include_bytes!("../assets/bt-red.png");
@@ -420,20 +430,24 @@ fn main() -> Result<()> {
         while let Ok(_e) = tray_channel.try_recv() {}
 
         if let Event::UserEvent(UserEvent::StatusChanged(status)) = event {
+            // Status line: a single glyph + host. The click-affordance lives
+            // in the tooltip so the line stays visually compact.
             let (icon_for_status, body) = match &status {
-                Status::Connecting => (
-                    &icon_orange,
-                    "Connecting…  (click to disconnect)".to_string(),
+                Status::Connecting => (&icon_orange, format!("⟳  {}", profile.ssh.host)),
+                Status::Connected => (&icon_green, format!("✓  {}", profile.ssh.host)),
+                Status::Disconnected(_) => (&icon_red, format!("✕  {}", profile.ssh.host)),
+                Status::Disabled => (&icon_gray, format!("○  {}", profile.ssh.host)),
+            };
+            let tooltip_action = match &status {
+                Status::Disabled | Status::Disconnected(_) => "click to connect",
+                _ => "click to disconnect",
+            };
+            let tooltip = match &status {
+                Status::Disconnected(err) => format!(
+                    "БелкаТуннель — {}\n{err}\n({tooltip_action})",
+                    profile.ssh.host
                 ),
-                Status::Connected => (
-                    &icon_green,
-                    format!("Connected to {}  (click to disconnect)", profile.ssh.host),
-                ),
-                Status::Disconnected(err) => (
-                    &icon_red,
-                    format!("Disconnected: {err}  (click to reconnect)"),
-                ),
-                Status::Disabled => (&icon_gray, "Disconnected  (click to connect)".to_string()),
+                _ => format!("БелкаТуннель — {} ({tooltip_action})", profile.ssh.host),
             };
             let icon = if hide_status_dot {
                 icon_hidden.clone()
@@ -442,7 +456,7 @@ fn main() -> Result<()> {
             };
             if let Some(t) = tray.as_ref() {
                 let _ = t.set_icon(Some(icon));
-                let _ = t.set_tooltip(Some(format!("БелкаТуннель — {body}")));
+                let _ = t.set_tooltip(Some(tooltip));
             }
             status_item.set_text(&body);
         }
@@ -581,13 +595,18 @@ fn update_listen_addr(config_path: &std::path::Path, new_addr: &str) -> Result<(
     Ok(())
 }
 
+/// Escape arbitrary text for safe inclusion inside an AppleScript string
+/// literal. Handles every character that would otherwise break the parse:
+/// backslash, double-quote, newline, carriage return.
+pub fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 fn macos_alert(title: &str, body: &str) {
-    let esc = |s: &str| {
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-    };
+    let esc = applescript_escape;
     let script = format!(
         r#"display alert "{}" message "{}" as critical buttons {{"OK"}} default button "OK""#,
         esc(title),
@@ -602,12 +621,7 @@ fn macos_alert(title: &str, body: &str) {
 /// Modal Yes/No confirmation. Returns true if the user clicked `action_label`.
 /// Default + cancel button is "Cancel".
 fn macos_confirm(title: &str, body: &str, action_label: &str) -> bool {
-    let esc = |s: &str| {
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-    };
+    let esc = applescript_escape;
     let script = format!(
         r#"set r to display alert "{}" message "{}" buttons {{"Cancel", "{}"}} default button "Cancel" cancel button "Cancel" as critical
 return button returned of r"#,
@@ -630,12 +644,7 @@ return button returned of r"#,
 
 /// Non-modal user notification — appears in the Notification Center.
 fn notify_user(title: &str, body: &str) {
-    let esc = |s: &str| {
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-    };
+    let esc = applescript_escape;
     let script = format!(
         r#"display notification "{}" with title "{}""#,
         esc(body),

@@ -139,3 +139,63 @@ impl ConfigFile {
             .ok_or_else(|| anyhow::anyhow!("active profile '{}' missing", self.active))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn default_config_has_default_profile() {
+        let cfg = ConfigFile::default();
+        assert_eq!(cfg.active, "default");
+        assert!(cfg.profiles.contains_key("default"));
+        assert!(!cfg.hide_status_dot);
+    }
+
+    #[test]
+    fn roundtrip_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        ConfigFile::default().save(&path).unwrap();
+        let back = ConfigFile::load(&path).unwrap();
+        assert_eq!(back.active, "default");
+        assert_eq!(back.profiles.len(), 1);
+        assert!(!back.hide_status_dot);
+    }
+
+    #[test]
+    fn rejects_dangling_active() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        std::fs::write(&path, r#"{"active":"ghost","profiles":{}}"#).unwrap();
+        let err = ConfigFile::load(&path).unwrap_err().to_string();
+        assert!(err.contains("ghost"), "got: {err}");
+    }
+
+    #[test]
+    fn hide_status_dot_defaults_false_when_missing() {
+        // Older configs predate the field; #[serde(default)] must fill in `false`.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        let body = r#"{
+            "active": "default",
+            "profiles": {
+                "default": {
+                    "ssh": {
+                        "host": "aurora.celestialtech.io", "port": 22222,
+                        "user": "olga", "key_path": "/tmp/k", "keepalive_secs": 30
+                    },
+                    "socks": { "listen_addr": "127.0.0.1", "listen_port": 1080 },
+                    "reconnect": {
+                        "initial_backoff_secs": 1, "max_backoff_secs": 60,
+                        "backoff_multiplier": 2.0
+                    }
+                }
+            }
+        }"#;
+        std::fs::write(&path, body).unwrap();
+        let cfg = ConfigFile::load(&path).unwrap();
+        assert!(!cfg.hide_status_dot);
+    }
+}

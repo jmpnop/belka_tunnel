@@ -137,9 +137,6 @@ pub fn install_or_update_async(
         // Clean up the legacy isolated profile from older versions of the app.
         cleanup_legacy_profile();
 
-        // Argument suppresses the dead-code warning on now-unused params.
-        let _ = (socks_host.is_empty(), socks_port);
-
         notify(
             "Firefox is ready",
             "Installed to /Applications. Every Firefox window now routes through the tunnel — the proxy is enforced by enterprise policy and can't be turned off.",
@@ -417,7 +414,7 @@ pub fn uninstall_async(notify: impl Fn(&str, &str) + Send + 'static) -> Result<(
 
     // Fall back to moving the app bundle to Trash via Finder.
     info!(bundle = %bundle.display(), "moving Firefox.app to Trash via Finder");
-    let path_str = bundle.to_string_lossy().replace('"', "\\\"");
+    let path_str = crate::applescript_escape(&bundle.to_string_lossy());
     let script = format!(
         r#"tell application "Finder" to delete POSIX file "{}""#,
         path_str
@@ -456,7 +453,7 @@ pub fn install_homebrew_async(notify: impl Fn(&str, &str) + Send + 'static) {
     activate
     do script "{}"
 end tell"#,
-        install_cmd.replace('"', "\\\"")
+        crate::applescript_escape(install_cmd)
     );
     if let Err(e) = std::process::Command::new("/usr/bin/osascript")
         .arg("-e")
@@ -501,4 +498,78 @@ end tell"#,
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use tempfile::tempdir;
+
+    fn build_policy(host: &str, port: u16) -> Value {
+        let dir = tempdir().unwrap();
+        let bundle = dir.path().join("Firefox.app");
+        let path = install_firefox_policies(&bundle, host, port).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        serde_json::from_str(&raw).expect("policies.json must be valid JSON")
+    }
+
+    #[test]
+    fn proxy_is_locked_socks5() {
+        let v = build_policy("127.0.0.1", 1080);
+        let p = &v["policies"];
+        assert_eq!(p["Proxy"]["Locked"], true);
+        assert_eq!(p["Proxy"]["Mode"], "manual");
+        assert_eq!(p["Proxy"]["SOCKSVersion"], 5);
+        assert_eq!(p["Proxy"]["SOCKSProxy"], "127.0.0.1:1080");
+        assert_eq!(p["Proxy"]["UseProxyForDNS"], true);
+    }
+
+    /// Regression for the bug fixed in commit 24972a7: without these three
+    /// fields Firefox's in-app updater would rewrite the bundle and wipe
+    /// our locked-proxy policy on every minor release.
+    #[test]
+    fn firefox_updater_disabled() {
+        let v = build_policy("127.0.0.1", 1080);
+        let p = &v["policies"];
+        assert_eq!(p["AppAutoUpdate"], false);
+        assert_eq!(p["DisableAppUpdate"], true);
+        assert_eq!(p["BackgroundAppUpdate"], false);
+    }
+
+    #[test]
+    fn anti_fingerprinting_layers_locked() {
+        let v = build_policy("127.0.0.1", 1080);
+        let p = &v["policies"];
+        assert_eq!(p["EnableTrackingProtection"]["Locked"], true);
+        assert_eq!(p["DNSOverHTTPS"]["Locked"], true);
+        assert_eq!(p["WebRTCIPHandling"]["Locked"], true);
+        assert_eq!(p["WebRTCIPHandling"]["Mode"], "disable_non_proxied_udp");
+    }
+
+    /// JSON-injection guard: even a host with characters that would break
+    /// hand-built JSON strings (quote, backslash, newline) must round-trip
+    /// byte-equal and yield valid JSON.
+    #[test]
+    fn host_with_special_chars_is_escaped() {
+        let host = "a\"b\\c\nd";
+        let v = build_policy(host, 9999);
+        let socks = v["policies"]["Proxy"]["SOCKSProxy"].as_str().unwrap();
+        assert_eq!(socks, format!("{host}:9999"));
+    }
+
+    proptest::proptest! {
+        /// Any printable host string must produce valid JSON that round-trips.
+        #[test]
+        fn policy_json_always_valid_for_printable_hosts(
+            host in "[\\x20-\\x7e]{1,40}",
+            port in 1u16..65535,
+        ) {
+            let v = build_policy(&host, port);
+            let socks = v["policies"]["Proxy"]["SOCKSProxy"].as_str().unwrap();
+            assert_eq!(socks, format!("{host}:{port}"));
+            assert_eq!(v["policies"]["Proxy"]["Locked"], true);
+            assert_eq!(v["policies"]["DisableAppUpdate"], true);
+        }
+    }
 }
