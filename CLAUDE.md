@@ -156,7 +156,7 @@ A self-contained menu-bar app in Rust that maintains the tunnel without dependin
 - Source: `app/` (Cargo project, edition 2021)
 - Built artefact: `app/dist/BelkaTunnel.app` (menu-bar-only, `LSUIElement=true` — no Dock icon)
 - Identifier: `io.celestialtech.BelkaTunnel`
-- Config: `~/Library/Application Support/io.celestialtech.BelkaTunnel/config.toml` (auto-created from defaults on first launch)
+- Config: `~/Library/Application Support/io.celestialtech.BelkaTunnel/config.json` (auto-created from defaults on first launch; daemon auto-restarts when this file changes on disk)
 - Logs: `~/Library/Application Support/io.celestialtech.BelkaTunnel/logs/proxy-tunnel.log`
 
 ### Architecture
@@ -165,7 +165,7 @@ A self-contained menu-bar app in Rust that maintains the tunnel without dependin
 - Hand-written SOCKS5 server in `src/socks.rs` — accepts CONNECT requests, opens a `direct-tcpip` channel on the SSH session, bridges TCP ↔ channel with `tokio::select!`.
 - `tunnel::run_forever` is a reconnect loop with exponential backoff (1s → 2s → 4s … capped at `max_backoff_secs`); a watchdog task polls `Handle::is_closed()` every second and tears down the SOCKS listener when the SSH session dies, so the loop trips fast on server-side disconnects.
 - Tokio multi-thread runtime owns the tunnel + SOCKS server; main thread runs the `tao` event loop with `tray-icon` (required by macOS for menu-bar integration). A bridge thread forwards `Status` changes from a `watch` channel into `UserEvent` notifications so the menu-bar title can react to state.
-- Menu-bar title: `●` Connected · `○` Connecting · `✕` Disconnected. Menu shows host:port + status + Quit.
+- Menu-bar title: `●` Connected · `○` Connecting · `✕` Disconnected. Menu includes profile header, status row, SOCKS5 endpoints, Listen-on-all-interfaces toggle, Edit Configuration (opens GUI subprocess), Browse via tunnel (Firefox), Firefox install/uninstall, About, Quit. A file-system watcher on `config.json` self-restarts the daemon on save, so edits in the GUI editor apply without a manual click.
 
 ### Build / test / harness — the `bt` CLI
 
@@ -228,7 +228,6 @@ Match the working CLI command: `olgatimoshevskaia@aurora.celestialtech.io:22222`
 ### Known limitations / open items
 
 - **Host key verification is permissive** — accepts whatever the server presents. Acceptable for first iteration (server identity is bound to the DDNS hostname we control); before redistribution, persist + verify against a known fingerprint.
-- **No menu-bar interactivity** beyond status indicator + Quit. Future: "Reconnect now", "Open config", "Open logs", "About" with key fingerprint + version.
 - **No autolaunch on login.** Add via launchd plist or macOS *Login Items* (Settings → General → Login Items → +).
 
 ## Olga's `~/.ssh/config` (recommended)
