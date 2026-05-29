@@ -46,10 +46,12 @@ def smoke(socks_port: int = SOCKS_PORT_DEFAULT) -> None:
 
     # Menu structure — confirm key items exist.
     items = util.menu_items()
+    # NB: "Restart (apply config changes)" was removed once the daemon
+    # gained a config-file watcher that auto-restarts on save (commit
+    # a332516). Don't re-add it here.
     must_have = [
         "Browse via tunnel (Firefox)",
         "Edit Configuration…",
-        "Restart (apply config changes)",
         "Quit",
     ]
     for name in must_have:

@@ -474,6 +474,7 @@ pub fn uninstall_async(notify: impl Fn(&str, &str) + Send + 'static) -> Result<(
 pub fn install_homebrew_async(
     notify: impl Fn(&str, &str) + Send + 'static,
     busy_guard: crate::BusyFlagGuard,
+    on_brew_detected: impl FnOnce() + Send + 'static,
 ) {
     // The official install command, as documented on https://brew.sh.
     let install_cmd = r#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#;
@@ -515,8 +516,12 @@ end tell"#,
                 info!(brew = %brew.display(), "Homebrew install detected");
                 notify(
                     "Homebrew installed",
-                    "Ready to use. Restart БелкаТуннель to refresh the menu.",
+                    "Refreshing БелкаТуннель so the menu picks up brew.",
                 );
+                // Trigger the same self-restart path the config watcher uses,
+                // so the menu rebuilds with brew-aware options. Done last
+                // because the parent process will exit moments after.
+                on_brew_detected();
                 return;
             }
             if std::time::Instant::now() >= deadline {

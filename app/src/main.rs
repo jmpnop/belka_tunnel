@@ -378,9 +378,17 @@ fn main() -> Result<()> {
                         "A poller is already watching for brew to appear.",
                     );
                 } else {
+                    let restart_proxy = proxy.clone();
                     firefox::install_homebrew_async(
                         notify_user,
                         BusyFlagGuard(&HOMEBREW_INSTALL_BUSY),
+                        move || {
+                            // Reuse the auto-restart path so the menu rebuilds
+                            // with brew-aware options. ConfigChanged's handler
+                            // does the right thing (RELAUNCH_BUSY guard +
+                            // tray.take + relaunch_self + ControlFlow::Exit).
+                            let _ = restart_proxy.send_event(UserEvent::ConfigChanged);
+                        },
                     );
                 }
             } else if event.id == uninstall_firefox_id {
