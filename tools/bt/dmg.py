@@ -198,27 +198,53 @@ def _write_dark_window_dsstore(volume_root: Path, volume_name: str) -> None:
 
     ds_path = volume_root / ".DS_Store"
 
-    # Build the dark-appearance bwsp plist. Finder reads this on the next
-    # open of the window and applies the dark theme to that window only
-    # (so the user's system theme is untouched).
-    bwsp_plist = {
-        "ShowSidebar": False,
-        "ShowStatusBar": False,
-        "ShowTabView": False,
-        "ShowToolbar": False,
-        "ShowPathbar": False,
-        "ContainerShowSidebar": False,
-        "WindowBounds": "{{100, 100}, {800, 448}}",
-        "PreviewPaneVisibility": False,
-        "WindowAppearance": "NSAppearanceNameDarkAqua",
-    }
-    bwsp_bytes = plistlib.dumps(bwsp_plist, fmt=plistlib.FMT_BINARY)
-
-    # Mutate in place — preserves dmgbuild's icon positions (Iloc), bg
-    # reference (BKGD), and other entries it wrote. ds_store's "r+" mode
-    # opens for read+write without truncating.
+    # Read dmgbuild's existing bwsp (which already has the right
+    # toolbar/sidebar/path-bar visibility flags + window bounds), parse
+    # as plist, ADD WindowAppearance, write it back. Just SETTING a
+    # fresh bwsp overwrites all of dmgbuild's settings — the toolbar
+    # and chrome would reappear, which we don't want.
+    # The canonical recipe (confirmed by the deep-dive swarm):
+    #
+    #   1. Read the existing bwsp blob dmgbuild produced — it's a binary
+    #      plist holding Finder's window-state knobs (toolbar/sidebar/
+    #      path-bar visibility, window bounds, etc.).
+    #   2. Add a WindowAppearance = "NSAppearanceNameDarkAqua" key. This
+    #      is the Finder-internal key it writes when a user toggles the
+    #      View Options "Dark mode" switch on macOS 11+. It scopes the
+    #      dark theme to THIS window only.
+    #   3. Re-assert the visibility flags belt-and-braces; if a future
+    #      dmgbuild drops one we still get the clean drag-to-/Applications
+    #      look.
+    #   4. Write the modified plist back as raw bytes (not a (type, blob)
+    #      tuple — ds_store accepts the bytes directly and detects).
+    #
+    # ds_store does NOT auto-decode the bwsp blob; it's returned as
+    # bytes. plistlib.loads is what turns the bytes into a dict.
     with DSStore.open(str(ds_path), "r+") as d:
-        d["."]["bwsp"] = ("blob", bwsp_bytes)
+        try:
+            existing = d["."]["bwsp"]
+        except KeyError:
+            existing = b""
+        # Defensive against the three shapes the ds_store API might
+        # return depending on version: raw bytes, a (type, blob) tuple,
+        # or a pre-decoded dict.
+        if isinstance(existing, dict):
+            bwsp = dict(existing)
+        elif isinstance(existing, tuple) and len(existing) == 2:
+            bwsp = plistlib.loads(existing[1]) if existing[1] else {}
+        elif isinstance(existing, (bytes, bytearray)) and existing:
+            bwsp = plistlib.loads(bytes(existing))
+        else:
+            bwsp = {}
+        bwsp["WindowAppearance"] = "NSAppearanceNameDarkAqua"
+        bwsp.update({
+            "ShowSidebar": False,
+            "ShowToolbar": False,
+            "ShowStatusBar": False,
+            "ShowPathbar": False,
+            "ShowTabView": False,
+        })
+        d["."]["bwsp"] = plistlib.dumps(bwsp, fmt=plistlib.FMT_BINARY)
 
 
 def _set_file_icon(target: Path, icon_path: Path) -> None:
