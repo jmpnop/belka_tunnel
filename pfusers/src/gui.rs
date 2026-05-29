@@ -865,7 +865,13 @@ impl App {
                     .inner_margin(Margin::same(22.0)),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(420.0);
+                // See draw_settings_modal for the rationale behind locking
+                // both min and max width: prevents the auto-sized window
+                // from growing each frame in response to INFINITY-desired
+                // child widgets.
+                let width = 420.0;
+                ui.set_min_width(width);
+                ui.set_max_width(width);
                 ui.label(
                     RichText::new("New User")
                         .color(theme::TEXT_PRIMARY)
@@ -981,7 +987,13 @@ impl App {
                     .inner_margin(Margin::same(22.0)),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(420.0);
+                // See draw_settings_modal for the rationale behind locking
+                // both min and max width: prevents the auto-sized window
+                // from growing each frame in response to INFINITY-desired
+                // child widgets.
+                let width = 420.0;
+                ui.set_min_width(width);
+                ui.set_max_width(width);
                 ui.label(
                     RichText::new(format!("Delete \"{target}\"?"))
                         .color(theme::TEXT_PRIMARY)
@@ -1057,7 +1069,13 @@ impl App {
                     .inner_margin(Margin::same(22.0)),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(420.0);
+                // See draw_settings_modal for the rationale behind locking
+                // both min and max width: prevents the auto-sized window
+                // from growing each frame in response to INFINITY-desired
+                // child widgets.
+                let width = 420.0;
+                ui.set_min_width(width);
+                ui.set_max_width(width);
                 ui.label(
                     RichText::new(format!("Reset password for \"{target}\""))
                         .color(theme::TEXT_PRIMARY)
@@ -1131,7 +1149,17 @@ impl App {
                     .inner_margin(Margin::same(22.0)),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(460.0);
+                // Lock the modal width — without this, child widgets using
+                // `desired_width(f32::INFINITY)` or arithmetic against
+                // `ui.available_width()` create a positive-feedback loop with
+                // the auto-sized egui::Window: each frame the children request
+                // wider space, the window grows, available_width grows, and
+                // the window expands sideways until it hits the screen edge.
+                // set_max_width + set_min_width together pin the inner content
+                // size, so child sizing requests can't drive the window wider.
+                let width = 460.0;
+                ui.set_min_width(width);
+                ui.set_max_width(width);
                 ui.label(
                     RichText::new("pfSense endpoint")
                         .color(theme::TEXT_PRIMARY)
@@ -1198,10 +1226,14 @@ impl App {
                                 .host_key_fingerprint
                                 .clone()
                                 .unwrap_or_else(|| "(none — TOFU mode)".to_string());
+                            // Use a fixed width rather than
+                            // `available_width() - 90.0` — the arithmetic
+                            // form participated in the feedback loop that
+                            // grew the modal sideways.
                             ui.add(
                                 egui::TextEdit::singleline(&mut show)
                                     .interactive(false)
-                                    .desired_width(ui.available_width() - 90.0),
+                                    .desired_width(330.0),
                             );
                             let can_forget = self.settings_form.ssh.host_key_fingerprint.is_some();
                             if ui
