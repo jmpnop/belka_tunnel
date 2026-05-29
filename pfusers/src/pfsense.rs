@@ -914,9 +914,18 @@ async fn verify_with_pfsense_parser(
     let our_fresh = fresh_doc.list_users()?.len() as i64;
     // PHP runs config.inc + parse_config(true) (which re-reads
     // /cf/conf/config.xml), and prints the count of system/user entries.
-    // -d disable_functions= overrides any restrictions; the explicit
-    // include_path matches pfSsh.php's bootstrap.
-    let cmd = "/usr/local/bin/php -d include_path=/etc/inc -r 'require_once(\"config.inc\"); parse_config(true); echo count($config[\"system\"][\"user\"]);'";
+    //
+    // CRITICAL: we do NOT pass `-d include_path=…` here. pfSense's default
+    // include_path (as set in /usr/local/etc/php.ini) is
+    //   .:/etc/inc:/usr/local/pfSense/include:/usr/local/pfSense/include/www
+    //   :/usr/local/www:/usr/local/captiveportal:/usr/local/pkg
+    //   :/usr/local/www/classes:/usr/local/www/classes/Form
+    //   :/usr/local/share/pear:/usr/local/share/openssl_x509_crl/
+    // Overriding it with a single dir (which we used to do) makes
+    // util.inc's `require_once('Net/IPv6.php')` fail to find the PEAR
+    // file and bail with exit 255 + empty stdout — exactly the
+    // "produced non-numeric" rollback we just hit.
+    let cmd = "/usr/local/bin/php -r 'require_once(\"config.inc\"); parse_config(true); echo count($config[\"system\"][\"user\"]);'";
     let out = exec_command(h, cmd).await?;
     let count_str = out.stdout.trim();
     let pfsense_count: i64 = count_str
@@ -1373,6 +1382,82 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- Live-router integration tests ----------
+    //
+    // These touch the real router at admin@192.168.1.1:22222. They are
+    // `#[ignore]` by default so the regular `cargo test` run stays
+    // hermetic. Run explicitly:
+    //   cargo test --release -p pfusers swap_olga_priv_live \
+    //       -- --ignored --nocapture
+    //
+    // The four-layer safety wrapper (snapshot + write + verify + rollback)
+    // means even a failed test leaves the router in a recoverable state:
+    // either the change took (and we saw the BEFORE/AFTER diff) or it was
+    // rolled back from the snapshot.
+
+    #[tokio::test]
+    #[ignore = "live router integration; run with `--ignored --nocapture`"]
+    async fn swap_olga_priv_live() {
+        let cfg = crate::config::AppConfig::load_or_default().expect("load config");
+        let (handle, _) = crate::ssh::connect(
+            &cfg.ssh.host,
+            cfg.ssh.port,
+            &cfg.ssh.user,
+            &cfg.ssh.key_path,
+            cfg.ssh.host_key_fingerprint.clone(),
+        )
+        .await
+        .expect("ssh connect");
+
+        let before = list_users(&handle).await.expect("list_users BEFORE");
+        let olga_before = before
+            .iter()
+            .find(|u| u.name == "olgatimoshevskaia")
+            .expect("olga in user list");
+        println!(
+            "BEFORE  olga.priv_list = {:?}  groups = {:?}",
+            olga_before.priv_list, olga_before.groups
+        );
+        assert!(
+            olga_before
+                .priv_list
+                .iter()
+                .any(|p| p == "user-shell-access"),
+            "expected olga to start with user-shell-access"
+        );
+
+        let req = UpdateUserReq {
+            name: "olgatimoshevskaia",
+            descr: None,
+            priv_list: Some(vec!["user-ssh-tunnel".to_string()]),
+            authorized_keys: None,
+            disabled: None,
+            // groups: None means "don't touch memberships" (audit #4).
+            groups: None,
+        };
+        update_user(&handle, req).await.expect("update_user");
+
+        let after = list_users(&handle).await.expect("list_users AFTER");
+        let olga_after = after
+            .iter()
+            .find(|u| u.name == "olgatimoshevskaia")
+            .expect("olga still in user list after update");
+        println!(
+            "AFTER   olga.priv_list = {:?}  groups = {:?}",
+            olga_after.priv_list, olga_after.groups
+        );
+        assert_eq!(
+            olga_after.priv_list,
+            vec!["user-ssh-tunnel".to_string()],
+            "priv list did not round-trip as expected"
+        );
+        assert_eq!(
+            olga_after.groups, olga_before.groups,
+            "group memberships changed even though groups=None was passed"
+        );
+        println!("OK — olga now uses user-ssh-tunnel (shell will be /usr/local/sbin/ssh_tunnel_shell)");
+    }
 
     const SAMPLE_XML: &str = r#"<?xml version="1.0"?>
 <pfsense>
