@@ -2,6 +2,8 @@
 
 Setting up an SSH-based SOCKS5 proxy that routes Olga's traffic through Pasha's pfSense WAN IP. The native macOS app under `app/` is `БелкаТуннель`; the working directory is `~/RustRoverProjects/belka_tunnel/` (migrated from the original `~/PycharmProjects/ssh-proxy-wan/` once the project outgrew Python tooling).
 
+**Repo:** https://github.com/jmpnop/belka_tunnel — current release is `v0.1.0` with `BelkaTunnel-0.1.0.dmg` attached. Earlier `jmpnop/belka-tunnel` was deleted and history rewritten to strip co-author trailers on 2026-05-29.
+
 The repo grew a small companion tool — **pfUsers** under `pfusers/` — for managing the router-side tunnel user accounts (created when olga needed her `user-shell-access` priv tightened to `user-ssh-tunnel`). It's documented later in this file under *Native macOS app — pfUsers*, and shares the Zed-inspired theme via `crates/belka-ui/`. BelkaTunnel itself is the project; pfUsers is in service of it.
 
 Architecture:
