@@ -1,6 +1,6 @@
 # БелкаТуннель
 
-Setting up an SSH-based SOCKS5 proxy that routes Olga's traffic through Pasha's pfSense WAN IP. The native macOS app under `app/` is `БелкаТуннель`; the working directory is still `~/PycharmProjects/ssh-proxy-wan/` (unrenamed to keep paths stable).
+Setting up an SSH-based SOCKS5 proxy that routes Olga's traffic through Pasha's pfSense WAN IP. The native macOS app under `app/` is `БелкаТуннель`; the working directory is `~/RustRoverProjects/belka_tunnel/` (migrated from the original `~/PycharmProjects/ssh-proxy-wan/` once the project outgrew Python tooling).
 
 The repo grew a small companion tool — **pfUsers** under `pfusers/` — for managing the router-side tunnel user accounts (created when olga needed her `user-shell-access` priv tightened to `user-ssh-tunnel`). It's documented later in this file under *Native macOS app — pfUsers*, and shares the Zed-inspired theme via `crates/belka-ui/`. BelkaTunnel itself is the project; pfUsers is in service of it.
 
@@ -145,7 +145,7 @@ dig +short aurora.celestialtech.io @1.1.1.1
 ssh -p 22222 admin@192.168.1.1 'rm -f /var/db/dyndns_*.cache && /usr/local/bin/php-cgi -q /etc/rc.dyndns.update; tail -20 /var/log/system.log | grep -i dyndns'
 
 # Inspect / rotate Cloudflare A-record via API (token from .env)
-source ~/PycharmProjects/ssh-proxy-wan/.env
+source ~/RustRoverProjects/belka_tunnel/.env
 curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
   "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records/$DDNS_RECORD_ID" | jq .result
 ```
@@ -276,7 +276,7 @@ A separate windowed admin app for CRUDing pfSense tunnel users on the router. Bu
 ### Repo layout (workspace)
 
 ```
-ssh-proxy-wan/
+belka_tunnel/
 ├── Cargo.toml                  # workspace root: members = [app, crates/belka-ui, pfusers]
 ├── app/                        # БелкаТуннель (menu-bar tunnel daemon)
 ├── crates/belka-ui/            # shared theme + form helpers (extracted from app/src/gui.rs)
