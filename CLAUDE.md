@@ -178,7 +178,7 @@ All build/test/verify/bench operations live in a uv-managed Python CLI at
 ```
 ./bt bootstrap          install git hooks + verify toolchain
 ./bt bundle             cargo build --release + assemble dist/BelkaTunnel.app
-./bt dmg                build dist/BelkaTunnel-<version>.dmg (voxel-tree bg)
+./bt dmg                build dist/BelkaTunnel-<version>.dmg (no bg image)
 ./bt verify bundle      Info.plist + codesign + arch + icon
 ./bt verify policies    policies.json schema + Locked/AppAutoUpdate invariants
 ./bt verify dmg         mount the latest DMG + check contents
@@ -199,12 +199,16 @@ because the policies.json generator uses a large `serde_json::json!{...}`.
 ### DMG installer
 
 `./bt dmg` produces `app/dist/BelkaTunnel-<version>.dmg`:
-- Background image (`app/assets/dmg-background.png` 800×448 + `@2x.png`
-  1600×900) shows two voxel trees flanking a glowing tunnel.
-- `BelkaTunnel.app` sits over the left tree at (200, 240).
-- `/Applications` symlink over the right tree at (600, 240).
+- No background image. macOS Finder forces icon labels to render in **black**
+  whenever a background image is set — confirmed empirically and via the
+  `create-dmg` / `dmgbuild` community write-ups. Without one, label colour
+  follows the user's system theme (white in Dark, black in Light), which is
+  what we want. The `WindowAppearance=NSAppearanceNameDarkAqua` `.DS_Store`
+  injection that lived here briefly is dead code per the same investigation
+  and only kept for historical reference; deleting it is fine.
+- `BelkaTunnel.app` at (200, 240); `/Applications` symlink at (600, 240).
 - Window chrome hidden, volume name `БелкаТуннель`, compressed UDZO.
-- ~11 MB output, built via `dmgbuild` (deterministic, no AppleScript).
+- ~7.5 MB output, built via `dmgbuild` (deterministic, no AppleScript).
 
 ### Icons
 

@@ -276,7 +276,9 @@ impl eframe::App for AboutApp {
 
                 if let Some(tex) = current_tex {
                     let size = tex.size_vec2();
-                    let scale = (image_rect.width() / size.x).max(image_rect.height() / size.y);
+                    // Contain (preserve aspect, no crop). Letterboxes against
+                    // the BLACK fill drawn just above.
+                    let scale = (image_rect.width() / size.x).min(image_rect.height() / size.y);
                     let scaled = size * scale;
                     let center = image_rect.center();
                     let img_rect = egui::Rect::from_center_size(center, scaled);
