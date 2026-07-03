@@ -389,6 +389,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "belka_tunnel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "belka-ui",
+ "directories",
+ "eframe",
+ "futures",
+ "image",
+ "include_dir",
+ "libc",
+ "local-ip-address",
+ "muda",
+ "notify",
+ "objc2 0.5.2",
+ "objc2-app-kit 0.2.2",
+ "objc2-foundation 0.2.2",
+ "proptest",
+ "rfd",
+ "russh",
+ "russh-keys",
+ "semver",
+ "serde",
+ "serde_json",
+ "tao",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "tray-icon",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3718,42 +3754,6 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
-]
-
-[[package]]
-name = "proxy-tunnel"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "belka-ui",
- "directories",
- "eframe",
- "futures",
- "image",
- "include_dir",
- "libc",
- "local-ip-address",
- "muda",
- "notify",
- "objc2 0.5.2",
- "objc2-app-kit 0.2.2",
- "objc2-foundation 0.2.2",
- "proptest",
- "rfd",
- "russh",
- "russh-keys",
- "semver",
- "serde",
- "serde_json",
- "tao",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "tray-icon",
 ]
 
 [[package]]

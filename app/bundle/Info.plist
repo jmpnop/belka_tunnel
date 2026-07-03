@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>proxy-tunnel</string>
+    <string>belka_tunnel</string>
     <key>CFBundleIdentifier</key>
     <string>io.celestialtech.BelkaTunnel</string>
     <key>CFBundleInfoDictionaryVersion</key>

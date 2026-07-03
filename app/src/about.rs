@@ -120,7 +120,29 @@ const FAINT: Color32 = Color32::from_rgb(110, 116, 132);
 const ACCENT: Color32 = Color32::from_rgb(99, 124, 247);
 
 const PAD: f32 = 28.0;
-const IMAGE_FRACTION: f32 = 0.46;
+/// Upper bound on how much of the window height the animation band may take,
+/// so an unexpectedly tall frame can't crowd out the text panel. The band's
+/// natural height is `width / frame_aspect` (see `frame_aspect`); this only
+/// clamps the pathological case.
+const MAX_IMAGE_FRACTION: f32 = 0.55;
+/// Fallback aspect (16:9) used only if the first frame's dimensions can't be
+/// read — every shipped frame is a normal raster JPEG, so this never triggers
+/// in practice.
+const FALLBACK_FRAME_ASPECT: f32 = 16.0 / 9.0;
+
+/// Width/height of a frame, read from the first JPEG's header (no full decode).
+/// Sizing the image band to this means the frame fills the band edge-to-edge —
+/// no letterbox bars, no crop, no distortion.
+fn read_frame_aspect(bytes: &[u8]) -> f32 {
+    let dims = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok());
+    match dims {
+        Some((w, h)) if h > 0 => w as f32 / h as f32,
+        _ => FALLBACK_FRAME_ASPECT,
+    }
+}
 
 /// Lower bound on cache capacity. The actual cap is `max(this, frame count)`
 /// up to 256 — see `frame_cache_cap` below. We keep this constant only so
@@ -153,6 +175,9 @@ struct AboutApp {
     /// where it ≥ frame count, eviction never runs after the first cycle
     /// and the animation is hit-only.
     cache_cap: usize,
+    /// Aspect ratio (w/h) of the frames, read once from the first frame's
+    /// header. The image band is sized to this so frames fill it without bars.
+    frame_aspect: f32,
     started: std::time::Instant,
     first_frame: bool,
     expanded_credits: bool,
@@ -178,15 +203,21 @@ impl AboutApp {
         let cache_cap = frame_bytes
             .len()
             .clamp(FRAME_CACHE_MIN_CAP, FRAME_CACHE_MAX_CAP);
+        let frame_aspect = frame_bytes
+            .first()
+            .map(|b| read_frame_aspect(b))
+            .unwrap_or(FALLBACK_FRAME_ASPECT);
         tracing::info!(
             count = frame_bytes.len(),
             cache_cap,
+            frame_aspect,
             "indexed animation frames (lazy decode)"
         );
 
         Self {
             frame_bytes,
             cache_cap,
+            frame_aspect,
             frame_cache: std::collections::HashMap::new(),
             frame_lru: std::collections::VecDeque::new(),
             started: std::time::Instant::now(),
@@ -251,9 +282,14 @@ impl eframe::App for AboutApp {
                 let painter = ui.painter().clone();
 
                 // ---------- Image area (top portion) ----------
+                // Height is derived from the frame's aspect ratio so the frame
+                // fills the band edge-to-edge — no letterbox. Clamped so a very
+                // tall frame can't swallow the text panel.
+                let band_h =
+                    (full.width() / self.frame_aspect).min(full.height() * MAX_IMAGE_FRACTION);
                 let image_rect = egui::Rect::from_min_max(
                     full.left_top(),
-                    egui::pos2(full.right(), full.top() + full.height() * IMAGE_FRACTION),
+                    egui::pos2(full.right(), full.top() + band_h),
                 );
                 painter.rect_filled(image_rect, Rounding::ZERO, Color32::BLACK);
 

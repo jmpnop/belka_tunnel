@@ -61,14 +61,12 @@ jobs:
           p12-password: ${{ secrets.CERTIFICATES_P12_PASSWORD }}
 
       # ---------- БелкаТуннель build ----------
-      - name: bt universal (BelkaTunnel)
-        run: ./bt universal
-
-      - name: bt bundle --universal
+      # `bt bundle` cross-builds arm64 + x86_64 and lipos them itself — there
+      # is no thin path. `bt verify bundle` hard-fails if the result is not fat.
+      - name: bt bundle (universal)
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
-          USE_UNIVERSAL: "1"
-        run: ./bt bundle --universal
+        run: ./bt bundle
 
       - name: bt verify bundle
         run: ./bt verify bundle
@@ -80,7 +78,9 @@ jobs:
         run: ./bt verify dmg
 
       # ---------- pfUsers build ----------
-      - name: bt bundle-pfusers
+      # Also universal — `bt bundle-pfusers` cross-builds + lipos pfusers, and
+      # `bt verify pfusers` hard-fails on a thin binary.
+      - name: bt bundle-pfusers (universal)
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
         run: ./bt bundle-pfusers

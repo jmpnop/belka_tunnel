@@ -3,21 +3,29 @@
 #
 # Environment knobs (all optional — empty = ad-hoc dev build):
 #   SIGN_IDENTITY    "Developer ID Application: NAME (TEAMID)" for real signing
-#   USE_UNIVERSAL    set to 1 to consume target/universal/release/proxy-tunnel
+#   USE_UNIVERSAL    set to 1 to consume target/universal/release/belka_tunnel
 #                    (run `bt universal` first to populate it)
 #
 set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="BelkaTunnel.app"
-BIN_NAME="proxy-tunnel"
+BIN_NAME="belka_tunnel"
 APP="dist/${APP_NAME}"
 ENTITLEMENTS="bundle/entitlements.plist"
 
 # ---------- Pick the binary ----------
+#
+# `app/` is a workspace member, so cargo writes build output to the WORKSPACE
+# target dir (repo-root/target), NOT app/target. Hardcoding "target/release"
+# (relative to this script's dir) silently copied a stale pre-workspace
+# app/target binary into the bundle — shipping old embedded assets even after
+# a clean rebuild. Resolve the real target dir from cargo instead.
+WORKSPACE_ROOT="$(cargo locate-project --workspace --message-format plain | xargs dirname)"
+TARGET_DIR="${CARGO_TARGET_DIR:-${WORKSPACE_ROOT}/target}"
 
 if [ "${USE_UNIVERSAL:-0}" = "1" ]; then
-    SRC_BIN="target/universal/release/${BIN_NAME}"
+    SRC_BIN="${TARGET_DIR}/universal/release/${BIN_NAME}"
     if [ ! -x "$SRC_BIN" ]; then
         echo "USE_UNIVERSAL=1 but $SRC_BIN missing — run 'bt universal' first" >&2
         exit 1
@@ -26,7 +34,12 @@ if [ "${USE_UNIVERSAL:-0}" = "1" ]; then
 else
     echo "==> cargo build --release"
     cargo build --release
-    SRC_BIN="target/release/${BIN_NAME}"
+    SRC_BIN="${TARGET_DIR}/release/${BIN_NAME}"
+fi
+
+if [ ! -x "$SRC_BIN" ]; then
+    echo "expected binary not found at $SRC_BIN" >&2
+    exit 1
 fi
 
 # ---------- Assemble bundle ----------

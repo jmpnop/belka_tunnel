@@ -40,7 +40,7 @@ pub fn is_enabled() -> bool {
 
 /// Write the plist so launchd starts the daemon at the next login.
 /// `binary_path` should be the absolute path to the installed bundle's
-/// MacOS binary — typically `/Applications/BelkaTunnel.app/Contents/MacOS/proxy-tunnel`.
+/// MacOS binary — typically `/Applications/BelkaTunnel.app/Contents/MacOS/belka_tunnel`.
 pub fn enable(binary_path: &Path) -> Result<()> {
     let path = plist_path().ok_or_else(|| anyhow!("HOME not set; cannot enable autolaunch"))?;
     if let Some(parent) = path.parent() {
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn build_plist_contains_required_keys_and_escapes() {
         let plist = build_plist(Path::new(
-            "/Applications/BelkaTunnel & friends.app/Contents/MacOS/proxy-tunnel",
+            "/Applications/BelkaTunnel & friends.app/Contents/MacOS/belka_tunnel",
         ));
         // Label + bundle id present (anchors automation that greps for this).
         assert!(plist.contains("<string>io.celestialtech.BelkaTunnel</string>"));
@@ -196,7 +196,7 @@ mod tests {
         let prev_home = std::env::var_os("HOME");
         std::env::set_var("HOME", dir.path());
 
-        let binary = Path::new("/Applications/BelkaTunnel.app/Contents/MacOS/proxy-tunnel");
+        let binary = Path::new("/Applications/BelkaTunnel.app/Contents/MacOS/belka_tunnel");
         enable(binary).unwrap();
         assert!(is_enabled(), "is_enabled should be true after enable");
 
