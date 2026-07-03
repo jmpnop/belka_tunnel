@@ -1,4 +1,5 @@
 use crate::config::Profile as Config;
+use crate::http;
 use crate::socks;
 use anyhow::{anyhow, bail, Context, Result};
 use russh::client::{self, Handle};
@@ -277,7 +278,7 @@ async fn run_one_session(
     }
 
     let handle = Arc::new(handle);
-    info!("SSH authenticated, starting SOCKS5 listener");
+    info!("SSH authenticated, starting SOCKS5 + HTTP proxy listeners");
     let _ = status.send(Status::Connected);
 
     let dead = Arc::new(tokio::sync::Notify::new());
@@ -313,7 +314,26 @@ async fn run_one_session(
         })
     };
 
+    // HTTP proxy runs as a sibling task feeding off the same `dead` signal.
+    // SOCKS5 stays the session-lifetime driver (its return ends the session).
+    // Both servers isolate their own bind failures (log + notify + park on
+    // `dead`) instead of propagating, so neither proxy failing to bind can tear
+    // the other — or the SSH session — down. socks::serve therefore returns
+    // only when `dead` fires (SSH closed / user disabled). We abort the HTTP
+    // task once SOCKS5 returns.
+    let http_task = {
+        let config = config.clone();
+        let handle = handle.clone();
+        let dead = dead.clone();
+        tokio::spawn(async move {
+            if let Err(e) = http::serve(config, handle, dead).await {
+                warn!(error = %format!("{e:#}"), "HTTP proxy server ended with error");
+            }
+        })
+    };
+
     let result = socks::serve(config.clone(), handle.clone(), dead).await;
+    http_task.abort();
     watchdog.abort();
     if !handle.is_closed() {
         let _ = handle

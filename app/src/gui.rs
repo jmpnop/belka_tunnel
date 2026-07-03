@@ -394,7 +394,7 @@ impl ConfigApp {
                     }
                 });
                 ui.label(
-                    RichText::new("Edit this profile's SSH endpoint, SOCKS5 listener, and reconnect behavior.")
+                    RichText::new("Edit this profile's SSH endpoint, SOCKS5 + HTTP proxy listeners, and reconnect behavior.")
                         .color(theme::TEXT_MUTED)
                         .size(12.0),
                 );
@@ -614,6 +614,98 @@ impl ConfigApp {
                                     {
                                         profile.socks.listen_port = p as u16;
                                     }
+                                });
+                            });
+                        });
+                    });
+
+                    ui.add_space(18.0);
+
+                    card(ui, |ui| {
+                        section_title(
+                            ui,
+                            "HTTP proxy listener",
+                            Some(
+                                "A second proxy on its own port for clients that only speak \
+                                 HTTP/HTTPS proxies (curl, git, npm, macOS Web Proxy fields). \
+                                 Rides the same SSH tunnel.",
+                            ),
+                        );
+
+                        ui.horizontal(|ui| {
+                            // Mutates profile.http.enabled directly; the daemon
+                            // picks up the change on the next config-watcher restart.
+                            ui.add(toggle_widget(
+                                "HTTP proxy enabled",
+                                &mut profile.http.enabled,
+                            ));
+                            ui.label(
+                                RichText::new(if profile.http.enabled {
+                                    "Listening for HTTP/HTTPS proxy clients."
+                                } else {
+                                    "Disabled — only SOCKS5 is served."
+                                })
+                                .color(theme::TEXT_MUTED)
+                                .size(11.5),
+                            );
+                        });
+                        ui.add_space(6.0);
+
+                        ui.add_enabled_ui(profile.http.enabled, |ui| {
+                            ui.horizontal(|ui| {
+                                let listen_all = profile.http.listen_addr == "0.0.0.0";
+                                let mut new_listen_all = listen_all;
+                                if ui
+                                    .add(toggle_widget(
+                                        "Listen on all interfaces",
+                                        &mut new_listen_all,
+                                    ))
+                                    .changed()
+                                {
+                                    profile.http.listen_addr = if new_listen_all {
+                                        "0.0.0.0".to_string()
+                                    } else {
+                                        "127.0.0.1".to_string()
+                                    };
+                                }
+                                ui.label(
+                                    RichText::new(if new_listen_all {
+                                        "Reachable from the LAN."
+                                    } else {
+                                        "Loopback only (this Mac)."
+                                    })
+                                    .color(theme::TEXT_MUTED)
+                                    .size(11.5),
+                                );
+                            });
+                            ui.add_space(6.0);
+
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    field(ui, "Listen address", None, |ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(
+                                                &mut profile.http.listen_addr,
+                                            )
+                                            .desired_width(200.0),
+                                        );
+                                    });
+                                });
+                                ui.add_space(20.0);
+                                ui.vertical(|ui| {
+                                    field(ui, "Listen port", None, |ui| {
+                                        let mut p = profile.http.listen_port as u32;
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut p)
+                                                    .range(1..=65535)
+                                                    .speed(1.0),
+                                            )
+                                            .changed()
+                                        {
+                                            profile.http.listen_port = p as u16;
+                                        }
+                                    });
                                 });
                             });
                         });

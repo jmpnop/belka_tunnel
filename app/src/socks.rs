@@ -23,9 +23,22 @@ const REP_ADDR_TYPE_NOT_SUPPORTED: u8 = 0x08;
 
 pub async fn serve(config: Arc<Config>, ssh: ClientHandle, dead: Arc<Notify>) -> Result<()> {
     let listen = format!("{}:{}", config.socks.listen_addr, config.socks.listen_port);
-    let listener = TcpListener::bind(&listen)
-        .await
-        .with_context(|| format!("bind SOCKS5 listener at {listen}"))?;
+    let listener = match TcpListener::bind(&listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            // Isolate bind failures symmetrically with the HTTP proxy: don't
+            // propagate (that would end the session and tear down a working
+            // HTTP proxy, then reconnect-loop rebuilding SSH just to re-hit the
+            // same bind error). Notify + park until the session dies instead.
+            warn!(addr = %listen, error = %e, "SOCKS5 bind failed; HTTP proxy unaffected");
+            crate::notify_user(
+                "БелкаТуннель — SOCKS5 proxy unavailable",
+                &format!("Couldn't listen on {listen}: {e}. Change the SOCKS port in Edit Configuration."),
+            );
+            dead.notified().await;
+            return Ok(());
+        }
+    };
     info!(addr = %listen, "SOCKS5 listening");
 
     loop {

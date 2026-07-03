@@ -6,6 +6,7 @@ mod config;
 mod config_watcher;
 mod firefox;
 mod gui;
+mod http;
 mod socks;
 mod tunnel;
 mod updater;
@@ -157,7 +158,7 @@ fn main() -> Result<()> {
 
     // Resolve paths used by menu items.
     let config_path = ConfigFile::default_path()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/proxy-tunnel-config.json"));
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/belka_tunnel-config.json"));
 
     // File-system watcher on config.json. When the GUI editor saves (or you
     // hand-edit), an event lands in the main event loop and the app
@@ -179,8 +180,8 @@ fn main() -> Result<()> {
     }
 
     let log_path = directories::ProjectDirs::from("io", "celestialtech", "BelkaTunnel")
-        .map(|d| d.data_dir().join("logs").join("proxy-tunnel.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/proxy-tunnel.log"));
+        .map(|d| d.data_dir().join("logs").join("belka_tunnel.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/belka_tunnel.log"));
     let data_dir = config_path
         .parent()
         .map(|p| p.to_path_buf())
@@ -212,6 +213,21 @@ fn main() -> Result<()> {
     let copy_endpoints_item = MenuItem::new(
         "Copy primary endpoint to clipboard",
         !endpoints.is_empty(),
+        None,
+    );
+
+    // ---------- HTTP proxy section (parallel to SOCKS5) ----------
+    let http_enabled = profile.http.enabled;
+    let http_toggle_item = CheckMenuItem::new("HTTP proxy enabled", true, http_enabled, None);
+    let http_endpoints = collect_endpoints(&profile.http.listen_addr, profile.http.listen_port);
+    let http_header = MenuItem::new("HTTP proxy endpoints (clients connect here):", false, None);
+    let http_endpoint_items: Vec<MenuItem> = http_endpoints
+        .iter()
+        .map(|e| MenuItem::new(format!("  • {e}"), false, None))
+        .collect();
+    let copy_http_endpoints_item = MenuItem::new(
+        "Copy primary HTTP endpoint to clipboard",
+        !http_endpoints.is_empty(),
         None,
     );
 
@@ -276,6 +292,14 @@ fn main() -> Result<()> {
         menu.append(ep)?;
     }
     menu.append(&copy_endpoints_item)?;
+    menu.append(&http_toggle_item)?;
+    if http_enabled {
+        menu.append(&http_header)?;
+        for ep in &http_endpoint_items {
+            menu.append(ep)?;
+        }
+        menu.append(&copy_http_endpoints_item)?;
+    }
     menu.append(&listen_all_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&firefox_submenu)?;
@@ -314,6 +338,8 @@ fn main() -> Result<()> {
     let reveal_data_id = reveal_data_item.id().clone();
     let open_logs_id = open_logs_item.id().clone();
     let copy_endpoints_id = copy_endpoints_item.id().clone();
+    let copy_http_endpoints_id = copy_http_endpoints_item.id().clone();
+    let http_toggle_id = http_toggle_item.id().clone();
     let listen_all_id = listen_all_item.id().clone();
     let status_toggle_id = status_item.id().clone();
     let install_firefox_id = install_firefox_item.id().clone();
@@ -326,6 +352,7 @@ fn main() -> Result<()> {
     };
     let socks_port_for_firefox = profile.socks.listen_port;
     let primary_endpoint = endpoints.first().cloned();
+    let primary_http_endpoint = http_endpoints.first().cloned();
     let _endpoint_items_keep_alive = endpoint_items.split_off(0); // hold them so they stay in the menu
     drop(_endpoint_items_keep_alive); // we appended already; let muda own them via the menu
 
@@ -462,6 +489,31 @@ fn main() -> Result<()> {
             } else if event.id == copy_endpoints_id {
                 if let Some(ep) = &primary_endpoint {
                     copy_to_clipboard(ep);
+                }
+            } else if event.id == copy_http_endpoints_id {
+                if let Some(ep) = &primary_http_endpoint {
+                    copy_to_clipboard(ep);
+                }
+            } else if event.id == http_toggle_id {
+                let new_enabled = http_toggle_item.is_checked();
+                if let Err(e) = set_http_enabled(&config_path, new_enabled) {
+                    error!(error = %e, "could not toggle HTTP proxy");
+                    // muda already flipped the checkmark; put it back so the menu
+                    // doesn't advertise a state we refused to persist, and tell
+                    // the user why (the common cause is an HTTP/SOCKS port clash).
+                    http_toggle_item.set_checked(!new_enabled);
+                    macos_alert(
+                        "Couldn't change the HTTP proxy",
+                        &format!(
+                            "{e}\n\nThe HTTP and SOCKS5 proxies must use different ports. \
+                             Open Edit Configuration to fix them."
+                        ),
+                    );
+                } else {
+                    info!(enabled = new_enabled, "HTTP proxy toggled; restarting");
+                    tray.take();
+                    relaunch_self();
+                    *control_flow = ControlFlow::Exit;
                 }
             } else if event.id == listen_all_id {
                 let new_addr = if listen_all_item.is_checked() {
@@ -642,7 +694,7 @@ fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     // worker pool.
     let file_appender = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("proxy-tunnel")
+        .filename_prefix("belka_tunnel")
         .filename_suffix("log")
         .max_log_files(7)
         .build(&log_dir);
@@ -758,8 +810,29 @@ fn copy_to_clipboard(s: &str) {
 fn update_listen_addr(config_path: &std::path::Path, new_addr: &str) -> Result<()> {
     let mut file = ConfigFile::load(config_path)?;
     if let Some(p) = file.profiles.get_mut(&file.active) {
+        // Only touches SOCKS — the menu "Listen on all interfaces" row lives in
+        // the SOCKS section and its checked state is derived from socks alone.
+        // The HTTP proxy has its own independent listen-address control in the
+        // GUI editor; clobbering it here would silently discard that choice.
         p.socks.listen_addr = new_addr.to_string();
     }
+    file.save(config_path)?;
+    Ok(())
+}
+
+fn set_http_enabled(config_path: &std::path::Path, enabled: bool) -> Result<()> {
+    let mut file = ConfigFile::load(config_path)?;
+    if let Some(p) = file.profiles.get_mut(&file.active) {
+        p.http.enabled = enabled;
+    }
+    // Validate BEFORE persisting. The port-collision / zero-port checks are
+    // gated on `http.enabled`, so a config that was legal while disabled can
+    // become invalid the instant we flip it on. Saving it unvalidated would let
+    // the watcher restart hit `load_or_default`, fail validation, and silently
+    // fall back to the DEFAULT profile — discarding the user's real SSH config.
+    // Refusing here keeps the on-disk config valid and the caller reverts the
+    // menu checkmark.
+    file.validate()?;
     file.save(config_path)?;
     Ok(())
 }
