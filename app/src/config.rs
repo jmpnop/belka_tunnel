@@ -8,6 +8,13 @@ use std::path::{Path, PathBuf};
 pub struct Profile {
     pub ssh: SshConfig,
     pub socks: SocksConfig,
+    /// HTTP/HTTPS forward proxy listener. A second adapter onto the same SSH
+    /// tunnel for clients that only speak HTTP proxy (curl/git/npm honoring
+    /// `http_proxy`/`https_proxy`, macOS "Web Proxy" fields) and can't use
+    /// SOCKS5. `#[serde(default)]` so configs written before this field
+    /// existed upgrade cleanly to the default (enabled, 0.0.0.0:8080).
+    #[serde(default)]
+    pub http: HttpConfig,
     pub reconnect: ReconnectConfig,
 }
 
@@ -37,6 +44,34 @@ pub struct SshConfig {
 pub struct SocksConfig {
     pub listen_addr: String,
     pub listen_port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HttpConfig {
+    /// When false the daemon binds no HTTP listener at all (SOCKS5 still runs).
+    /// `#[serde(default)]` defaults a missing key to `true` so the feature is
+    /// on for upgraded configs; flip it off from the menu or the GUI editor.
+    #[serde(default = "default_http_enabled")]
+    pub enabled: bool,
+    pub listen_addr: String,
+    pub listen_port: u16,
+}
+
+fn default_http_enabled() -> bool {
+    true
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_http_enabled(),
+            // Mirror SOCKS' 0.0.0.0 default (LAN-reachable, matching the app's
+            // open-proxy posture). The HTTP proxy's listen address is edited
+            // independently of SOCKS in the GUI.
+            listen_addr: "0.0.0.0".into(),
+            listen_port: 8080,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -75,6 +110,7 @@ impl Default for Profile {
                 listen_addr: "0.0.0.0".into(),
                 listen_port: 1080,
             },
+            http: HttpConfig::default(),
             reconnect: ReconnectConfig {
                 initial_backoff_secs: 1,
                 max_backoff_secs: 60,
@@ -166,6 +202,26 @@ impl ConfigFile {
         for (name, p) in &self.profiles {
             if p.socks.listen_port == 0 {
                 anyhow::bail!("profile '{name}': socks.listen_port must be > 0");
+            }
+            if p.http.enabled {
+                if p.http.listen_port == 0 {
+                    anyhow::bail!("profile '{name}': http.listen_port must be > 0");
+                }
+                // Two listeners on the identical addr+port can't both bind —
+                // the second silently loses. Catch the footgun at load so the
+                // GUI editor surfaces it instead of one proxy mysteriously
+                // never accepting connections. (Different addr OR different
+                // port is fine — e.g. 0.0.0.0:1080 vs 0.0.0.0:8080.)
+                if p.http.listen_addr == p.socks.listen_addr
+                    && p.http.listen_port == p.socks.listen_port
+                {
+                    anyhow::bail!(
+                        "profile '{name}': http listener ({}:{}) collides with socks listener — \
+                         give them different ports",
+                        p.http.listen_addr,
+                        p.http.listen_port
+                    );
+                }
             }
             if p.ssh.port == 0 {
                 anyhow::bail!("profile '{name}': ssh.port must be > 0");
@@ -441,5 +497,68 @@ mod tests {
         std::fs::write(&path, body).unwrap();
         let cfg = ConfigFile::load(&path).unwrap();
         assert_eq!(cfg.active, "default");
+    }
+
+    /// A config written before the HTTP proxy existed (no `http` key) must load
+    /// and synthesize the default HttpConfig (enabled, 0.0.0.0:8080) — that's
+    /// the whole point of `#[serde(default)]` on the field. The `write_cfg`
+    /// helper above already emits http-less JSON, so this also guards that the
+    /// existing fixtures keep parsing.
+    #[test]
+    fn http_config_defaults_when_absent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        write_cfg(&path, 2.0, 1, 60, 1080);
+        let cfg = ConfigFile::load(&path).unwrap();
+        let http = &cfg.profiles["default"].http;
+        assert!(http.enabled, "http should default to enabled");
+        assert_eq!(http.listen_addr, "0.0.0.0");
+        assert_eq!(http.listen_port, 8080);
+    }
+
+    #[test]
+    fn rejects_zero_http_port_when_enabled() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        let body = r#"{"active":"default","profiles":{"default":{
+            "ssh":{"host":"x","port":22,"user":"u","key_path":"/k","keepalive_secs":30},
+            "socks":{"listen_addr":"127.0.0.1","listen_port":1080},
+            "http":{"enabled":true,"listen_addr":"127.0.0.1","listen_port":0},
+            "reconnect":{"initial_backoff_secs":1,"max_backoff_secs":60,"backoff_multiplier":2.0}
+        }}}"#;
+        std::fs::write(&path, body).unwrap();
+        let err = ConfigFile::load(&path).unwrap_err().to_string();
+        assert!(err.contains("http.listen_port"), "got: {err}");
+    }
+
+    /// A zero http port is tolerated when the HTTP proxy is disabled — we only
+    /// bind (and only validate) it when enabled.
+    #[test]
+    fn allows_zero_http_port_when_disabled() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        let body = r#"{"active":"default","profiles":{"default":{
+            "ssh":{"host":"x","port":22,"user":"u","key_path":"/k","keepalive_secs":30},
+            "socks":{"listen_addr":"127.0.0.1","listen_port":1080},
+            "http":{"enabled":false,"listen_addr":"127.0.0.1","listen_port":0},
+            "reconnect":{"initial_backoff_secs":1,"max_backoff_secs":60,"backoff_multiplier":2.0}
+        }}}"#;
+        std::fs::write(&path, body).unwrap();
+        assert!(ConfigFile::load(&path).is_ok());
+    }
+
+    #[test]
+    fn rejects_socks_http_port_collision() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        let body = r#"{"active":"default","profiles":{"default":{
+            "ssh":{"host":"x","port":22,"user":"u","key_path":"/k","keepalive_secs":30},
+            "socks":{"listen_addr":"0.0.0.0","listen_port":1080},
+            "http":{"enabled":true,"listen_addr":"0.0.0.0","listen_port":1080},
+            "reconnect":{"initial_backoff_secs":1,"max_backoff_secs":60,"backoff_multiplier":2.0}
+        }}}"#;
+        std::fs::write(&path, body).unwrap();
+        let err = ConfigFile::load(&path).unwrap_err().to_string();
+        assert!(err.contains("collides"), "got: {err}");
     }
 }

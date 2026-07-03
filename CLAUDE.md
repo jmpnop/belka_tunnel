@@ -154,23 +154,52 @@ curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
 
 ## Native macOS app (`app/`)
 
-A self-contained menu-bar app in Rust that maintains the tunnel without depending on the system `ssh` binary. Same external behaviour as the SSH command line, but persistent and visible.
+A self-contained menu-bar app in Rust that maintains the tunnel without depending on the system `ssh` binary. Same external behaviour as the SSH command line, but persistent and visible. It exposes the tunnel to local clients two ways at once: a **SOCKS5** proxy and an **HTTP/HTTPS** forward proxy (see *Proxy front-ends* below).
 
 ### What it is
 
 - Source: `app/` (Cargo project, edition 2021)
 - Built artefact: `app/dist/BelkaTunnel.app` (menu-bar-only, `LSUIElement=true` — no Dock icon)
 - Identifier: `io.celestialtech.BelkaTunnel`
-- Config: `~/Library/Application Support/io.celestialtech.BelkaTunnel/config.json` (auto-created from defaults on first launch; daemon auto-restarts when this file changes on disk)
-- Logs: `~/Library/Application Support/io.celestialtech.BelkaTunnel/logs/proxy-tunnel.log`
+- Config: `~/Library/Application Support/io.celestialtech.BelkaTunnel/config.json` (auto-created from defaults on first launch; daemon auto-restarts when this file changes on disk). Each profile carries an `ssh`, a `socks`, an `http`, and a `reconnect` block. The `http` block is `#[serde(default)]`, so configs written before the HTTP proxy existed upgrade in place to `{enabled: true, listen_addr: "0.0.0.0", listen_port: 8080}` on next load.
+- Logs: `~/Library/Application Support/io.celestialtech.BelkaTunnel/logs/belka_tunnel.log`
 
 ### Architecture
 
 - `russh` 0.45 for native SSH (no `ssh` subprocess; loads `~/.ssh/id_ed25519` directly).
-- Hand-written SOCKS5 server in `src/socks.rs` — accepts CONNECT requests, opens a `direct-tcpip` channel on the SSH session, bridges TCP ↔ channel with `tokio::select!`.
-- `tunnel::run_forever` is a reconnect loop with exponential backoff (1s → 2s → 4s … capped at `max_backoff_secs`); a watchdog task polls `Handle::is_closed()` every second and tears down the SOCKS listener when the SSH session dies, so the loop trips fast on server-side disconnects.
-- Tokio multi-thread runtime owns the tunnel + SOCKS server; main thread runs the `tao` event loop with `tray-icon` (required by macOS for menu-bar integration). A bridge thread forwards `Status` changes from a `watch` channel into `UserEvent` notifications so the menu-bar title can react to state.
-- Menu-bar title: `●` Connected · `○` Connecting · `✕` Disconnected. Menu includes profile header, status row, SOCKS5 endpoints, Listen-on-all-interfaces toggle, Edit Configuration (opens GUI subprocess), Browse via tunnel (Firefox), Firefox install/uninstall, About, Quit. A file-system watcher on `config.json` self-restarts the daemon on save, so edits in the GUI editor apply without a manual click.
+- Two protocol-agnostic SSH-forwarding primitives in `src/tunnel.rs` do the actual work: `open_channel(host, port)` opens a `direct-tcpip` channel on the SSH session, and `bridge(tcp, channel)` pumps bytes both directions with proper half-close. Both proxy front-ends call these verbatim — only the per-connection request *parsing* differs.
+- Hand-written SOCKS5 server in `src/socks.rs` — parses the SOCKS5 greeting + CONNECT request, then `open_channel` + `bridge`.
+- Hand-written HTTP/HTTPS forward proxy in `src/http.rs` — see *Proxy front-ends* below.
+- `tunnel::run_forever` is a reconnect loop with exponential backoff (1s → 2s → 4s … capped at `max_backoff_secs`); a watchdog task polls `Handle::is_closed()` every second and signals a shared `dead` `Notify` when the SSH session dies, tearing down both listeners so the loop trips fast on server-side disconnects.
+- Tokio multi-thread runtime owns the tunnel + both proxy servers; main thread runs the `tao` event loop with `tray-icon` (required by macOS for menu-bar integration). A bridge thread forwards `Status` changes from a `watch` channel into `UserEvent` notifications so the menu-bar title can react to state.
+- Menu-bar title: `●` Connected · `○` Connecting · `✕` Disconnected. Menu includes profile header, status row, SOCKS5 endpoints + copy, **HTTP-proxy-enabled toggle + HTTP endpoints + copy**, Listen-on-all-interfaces toggle (SOCKS listen address; the HTTP proxy has its own independent listen-address control in the GUI editor), Edit Configuration (opens GUI subprocess), Browse via tunnel (Firefox), Firefox install/uninstall, About, Quit. A file-system watcher on `config.json` self-restarts the daemon on save, so edits in the GUI editor apply without a manual click.
+
+### Proxy front-ends (SOCKS5 + HTTP/HTTPS)
+
+The SSH tunnel is the engine; SOCKS5 and HTTP are two thin, independent adapters onto it (not chained — HTTP does **not** convert to SOCKS5). Each parses the client's "where to" request and hands `(host, port)` to the same `tunnel::open_channel` + `tunnel::bridge`. The HTTP proxy exists for clients that only speak HTTP proxy and can't use SOCKS: anything honoring `http_proxy`/`https_proxy` (curl, git, npm, wget), and macOS's system *Web Proxy (HTTP)* / *Secure Web Proxy (HTTPS)* fields.
+
+- **Separate ports.** SOCKS5 defaults to `0.0.0.0:1080`, HTTP to `0.0.0.0:8080`. Independent listeners; `validate()` rejects a same-addr+port collision at load.
+- **No auth** on either proxy — open on the LAN, symmetric posture. The real perimeter is the LAN + the SSH tunnel, not a proxy password.
+- **`src/http.rs` handler semantics** (mirrors go-gost's HTTP *handler*, the only piece of go-gost this borrows):
+  - `CONNECT host:port` → `open_channel`, reply `200 Connection Established`, then `bridge` raw bytes. This is how **HTTPS** rides through: the client runs its own TLS end-to-end over the tunneled stream. **Not** a TLS-terminating/MITM proxy — we never see plaintext.
+  - Absolute-form `GET http://host[:port]/path` (plain HTTP) → rewrite the request line to origin-form (`GET /path`), strip `Proxy-Connection`/`Proxy-Authorization`, force `Connection: close`, synthesize `Host` if absent, then `open_channel` + write head + `bridge`.
+  - Errors: unparseable/origin-form-to-proxy → `400`; `open_channel` failure → `502`. Head read is bounded by a 10 s timeout + 64 KiB cap.
+  - The pure `parse_request(&[u8]) -> Target` fn is the unit-testable core (same pattern as `socks.rs`'s `read_socks5_request`).
+  - **Known limitation:** plain-HTTP keep-alive is disabled via the forced `Connection: close` (one request = one dial+bridge — avoids a full HTTP/1.1 message-framing parser). HTTPS via CONNECT is unaffected and is the common path.
+- **Failure isolation:** the HTTP proxy runs as a sibling task off the shared `dead` signal; SOCKS5 stays the session-lifetime driver. If the HTTP listener can't bind (port occupied/misconfigured) it logs and parks instead of propagating — a bad HTTP port can never take SOCKS5 down.
+- **Firefox** is still pointed at SOCKS5 (with proxy-DNS) by the menu's Firefox policy writer; the HTTP proxy is for non-browser/CLI/system-proxy clients.
+
+Client usage examples (with the daemon connected):
+
+```bash
+# HTTPS through the HTTP proxy (CONNECT) — returns the pfSense WAN IP:
+curl -x http://127.0.0.1:8080 https://ifconfig.me
+https_proxy=http://127.0.0.1:8080 curl https://ifconfig.me
+# plain HTTP forward:
+curl -x http://127.0.0.1:8080 http://ifconfig.me
+# SOCKS5 (unchanged):
+curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
+```
 
 ### Build / test / harness — the `bt` CLI
 
@@ -244,18 +273,14 @@ open app/dist/BelkaTunnel.app
 Or for live logs to stderr:
 
 ```
-RUST_LOG=info app/dist/BelkaTunnel.app/Contents/MacOS/proxy-tunnel
+RUST_LOG=info app/dist/BelkaTunnel.app/Contents/MacOS/belka_tunnel
 ```
 
-CLI override during development:
-
-```
-app/target/release/proxy-tunnel --config some-test.toml
-```
+There is **no `--config` flag** — the binary always loads `ConfigFile::default_path()` (the Application Support `config.json`). The only CLI args are `--gui` (launch the config editor subprocess) and `--about`. To run against a throwaway config during development, edit the real `config.json` (the file-system watcher will self-restart the daemon on save), or temporarily back it up and swap it. The `RUST_LOG=info …/Contents/MacOS/belka_tunnel` invocation above runs the same daemon in the foreground with logs on stderr.
 
 ### Defaults baked in
 
-Match the working CLI command: `olgatimoshevskaia@aurora.celestialtech.io:22222`, key `~/.ssh/id_ed25519`, SOCKS at `127.0.0.1:1080`, 30 s keepalive, exponential reconnect backoff. On first launch the daemon writes the active config to disk so it can be edited.
+Match the working CLI command: `olgatimoshevskaia@aurora.celestialtech.io:22222`, key `~/.ssh/id_ed25519`, SOCKS5 at `0.0.0.0:1080`, **HTTP/HTTPS proxy at `0.0.0.0:8080`** (`enabled: true`), 30 s keepalive, exponential reconnect backoff. On first launch the daemon writes the active config to disk so it can be edited. (Listening on `0.0.0.0` makes both proxies reachable from the LAN; flip the menu's "Listen on all interfaces" off, or edit `listen_addr` to `127.0.0.1`, for loopback-only.)
 
 ### Known limitations / open items
 
@@ -338,7 +363,7 @@ pfSense's `local_user_set_password` bails on an empty argument, so we can't simp
 ```bash
 ./bt bundle-pfusers           # cargo build --release -p pfusers + assemble dist/pfUsers.app
 ./bt verify pfusers           # Info.plist keys, codesign, assert LSUIElement absent
-cargo test --workspace        # 53 BelkaTunnel + 20 pfusers = 73 unit tests
+cargo test --workspace        # 74 BelkaTunnel + 20 pfusers = 94 unit tests
 cargo test --release -p pfusers swap_olga_priv_live -- --ignored --nocapture
                               # live-router integration test against admin@192.168.1.1
 ```
