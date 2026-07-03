@@ -9,6 +9,25 @@ from pathlib import Path
 from . import util
 
 
+def assert_universal(binary: Path) -> None:
+    """Fail unless `binary` is a fat Mach-O with BOTH arm64 and x86_64 slices.
+
+    Both apps ship universal, always. A thin binary that slips through would
+    silently refuse to launch on the other architecture — exactly the kind of
+    after-release surprise this gate exists to prevent.
+    """
+    r = util.run(["lipo", "-archs", str(binary)], capture=True, check=False)
+    archs = set(r.stdout.split()) if r.code == 0 else set()
+    missing = {"arm64", "x86_64"} - archs
+    if missing:
+        util.fail(
+            f"{binary.name} is not universal — has {sorted(archs) or 'unknown'}, "
+            f"missing {sorted(missing)}. Rebuild with `bt bundle` (universal)."
+        )
+        raise SystemExit(1)
+    util.ok(f"universal binary: {' + '.join(sorted(archs))}")
+
+
 def verify_bundle() -> None:
     """Sanity-check the .app bundle."""
     util.step("verify bundle")
@@ -18,7 +37,7 @@ def verify_bundle() -> None:
         raise SystemExit(1)
 
     info_plist = bundle / "Contents" / "Info.plist"
-    binary = bundle / "Contents" / "MacOS" / "proxy-tunnel"
+    binary = bundle / "Contents" / "MacOS" / "belka_tunnel"
     icon = bundle / "Contents" / "Resources" / "AppIcon.icns"
     code_sig = bundle / "Contents" / "_CodeSignature" / "CodeResources"
 
@@ -32,7 +51,7 @@ def verify_bundle() -> None:
     # Info.plist must declare the right bundle identity + LSUIElement.
     info = plistlib.loads(info_plist.read_bytes())
     expected = {
-        "CFBundleExecutable": "proxy-tunnel",
+        "CFBundleExecutable": "belka_tunnel",
         "CFBundleIdentifier": "io.celestialtech.BelkaTunnel",
         "CFBundleName": "BelkaTunnel",
         "CFBundleIconFile": "AppIcon",
@@ -45,9 +64,8 @@ def verify_bundle() -> None:
             raise SystemExit(1)
     util.ok(f"Info.plist: {info.get('CFBundleShortVersionString')}")
 
-    # Binary architecture(s).
-    r = util.run(["file", str(binary)], capture=True)
-    util.console.print(f"  arch: {r.stdout.strip().split(': ', 1)[1]}")
+    # Must be a universal (arm64 + x86_64) binary — hard gate.
+    assert_universal(binary)
 
     # codesign --verify should pass even for ad-hoc.
     cs = util.run(["codesign", "--verify", "--strict", str(bundle)], check=False)
@@ -98,8 +116,8 @@ def verify_pfusers_bundle() -> None:
         raise SystemExit(1)
     util.ok(f"Info.plist: {info.get('CFBundleShortVersionString')}")
 
-    r = util.run(["file", str(binary)], capture=True)
-    util.console.print(f"  arch: {r.stdout.strip().split(': ', 1)[1]}")
+    # Must be a universal (arm64 + x86_64) binary — hard gate.
+    assert_universal(binary)
 
     cs = util.run(["codesign", "--verify", "--strict", str(bundle)], check=False)
     if cs.code != 0:

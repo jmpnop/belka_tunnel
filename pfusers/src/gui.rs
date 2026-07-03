@@ -428,7 +428,6 @@ impl App {
             }
         });
     }
-
 }
 
 impl eframe::App for App {

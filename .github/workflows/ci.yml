@@ -36,10 +36,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-ws-
 
-      - name: Install Rust
+      - name: Install Rust + cross-compile targets
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          # Both apps bundle as universal (arm64 + x86_64) — even in CI, so the
+          # bundle steps exercise the real artifact and `bt verify` can assert
+          # the fat binary. `bt bundle` self-adds these targets too, but listing
+          # them here primes the toolchain cache.
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -53,16 +58,16 @@ jobs:
       - name: bt precommit (fmt + clippy + tests)
         run: ./bt precommit
 
-      # Spot-check that the .app + DMG paths still build — catches
-      # bundling regressions (Info.plist, codesign, dmgbuild settings)
-      # that the unit tests can't see.
-      - name: bt bundle (БелкаТуннель)
+      # Build both apps as UNIVERSAL bundles — catches bundling regressions
+      # (Info.plist, codesign, dmgbuild settings) the unit tests can't see, and
+      # `bt verify` hard-fails if either binary isn't a fat arm64+x86_64 Mach-O.
+      - name: bt bundle (БелкаТуннель, universal)
         run: ./bt bundle
 
       - name: bt verify bundle
         run: ./bt verify bundle
 
-      - name: bt bundle-pfusers
+      - name: bt bundle-pfusers (universal)
         run: ./bt bundle-pfusers
 
       - name: bt verify pfusers

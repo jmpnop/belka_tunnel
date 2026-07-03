@@ -23,14 +23,14 @@ err_console = Console(stderr=True, style="bold red")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 APP_DIR = REPO_ROOT / "app"
 BUNDLE = APP_DIR / "dist" / "BelkaTunnel.app"
-BINARY = APP_DIR / "target" / "release" / "proxy-tunnel"
+BINARY = REPO_ROOT / "target" / "release" / "belka_tunnel"
 LOG_DIR = (
     Path.home()
     / "Library"
     / "Application Support"
     / "io.celestialtech.BelkaTunnel"
 )
-LOG_FILE = LOG_DIR / "logs" / "proxy-tunnel.log"
+LOG_FILE = LOG_DIR / "logs" / "belka_tunnel.log"
 CONFIG_FILE = LOG_DIR / "config.json"  # the app's persisted config (JSON, not TOML)
 
 
@@ -119,18 +119,18 @@ def timed(label: str) -> Iterator[None]:
 
 
 def app_pids() -> list[int]:
-    """PIDs of running proxy-tunnel processes."""
+    """PIDs of running belka_tunnel processes."""
     import psutil
 
     return [
         p.pid
         for p in psutil.process_iter(["name", "exe"])
-        if p.info["name"] == "proxy-tunnel"
+        if p.info["name"] == "belka_tunnel"
     ]
 
 
 def kill_app() -> None:
-    """Stop any running proxy-tunnel process and wait for it to exit."""
+    """Stop any running belka_tunnel process and wait for it to exit."""
     import psutil
 
     for pid in app_pids():
@@ -170,9 +170,9 @@ def wait_for_listener(port: int, host: str = "127.0.0.1", timeout: float = 10.0)
 
 
 def menu_items() -> list[str]:
-    """Return the top-level menu item names of the running proxy-tunnel app."""
+    """Return the top-level menu item names of the running belka_tunnel app."""
     script = (
-        'tell application "System Events" to tell process "proxy-tunnel" '
+        'tell application "System Events" to tell process "belka_tunnel" '
         "to get name of every menu item of menu 1 of menu bar item 1 "
         "of menu bar 1"
     )

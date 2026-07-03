@@ -1,11 +1,11 @@
 [package]
-name = "proxy-tunnel"
+name = "belka_tunnel"
 version = "0.1.0"
 edition = "2021"
 description = "SSH SOCKS5 tunnel daemon with auto-reconnect (aurora.celestialtech.io)"
 
 [[bin]]
-name = "proxy-tunnel"
+name = "belka_tunnel"
 path = "src/main.rs"
 
 [dependencies]

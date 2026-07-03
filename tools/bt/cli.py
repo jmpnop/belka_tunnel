@@ -42,33 +42,27 @@ def cmd_build(
 
 
 @app.command()
-def bundle(
-    universal: bool = typer.Option(
-        False,
-        "--universal",
-        help="Consume target/universal/release/proxy-tunnel (run `bt universal` first)",
-    ),
-) -> None:
-    """Build release + assemble dist/BelkaTunnel.app."""
-    build.bundle(universal=universal)
+def bundle() -> None:
+    """Build a UNIVERSAL (arm64+x86_64) release + assemble dist/BelkaTunnel.app."""
+    build.bundle()
 
 
 @app.command()
 def universal() -> None:
-    """Cross-build arm64+x86_64 universal binary via lipo."""
+    """Cross-build the БелкаТуннель arm64+x86_64 universal binary via lipo."""
     build.build_universal()
 
 
 @app.command(name="bundle-pfusers")
-def cmd_bundle_pfusers(
-    universal: bool = typer.Option(
-        False,
-        "--universal",
-        help="Consume target/universal/release/pfusers (run `bt universal-pfusers` first)",
-    ),
-) -> None:
-    """Build release + assemble pfusers/dist/pfUsers.app."""
-    build.bundle_pfusers(universal=universal)
+def cmd_bundle_pfusers() -> None:
+    """Build a UNIVERSAL (arm64+x86_64) release + assemble pfusers/dist/pfUsers.app."""
+    build.bundle_pfusers()
+
+
+@app.command(name="universal-pfusers")
+def cmd_universal_pfusers() -> None:
+    """Cross-build the pfUsers arm64+x86_64 universal binary via lipo."""
+    build.build_universal_pfusers()
 
 
 # ---------- Lint + test ----------
@@ -169,8 +163,7 @@ def cmd_release() -> None:
     notarized + stapled DMG ready for distribution.
     """
     util.step("release pipeline")
-    build.build_universal()
-    build.bundle(universal=True)
+    build.bundle()  # always universal + cleaned
     verify.verify_bundle()
     verify.verify_policies()
     dmg.build_dmg()
@@ -260,7 +253,7 @@ def run_bundle() -> None:
 
 @app.command()
 def kill() -> None:
-    """Stop any running proxy-tunnel process."""
+    """Stop any running belka_tunnel process."""
     util.kill_app()
     util.ok("stopped")
 
