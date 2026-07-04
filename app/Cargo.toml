@@ -1,6 +1,6 @@
 [package]
 name = "belka_tunnel"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "SSH SOCKS5 tunnel daemon with auto-reconnect (aurora.celestialtech.io)"
 
@@ -50,7 +50,7 @@ proptest = "1"
 name = "BelkaTunnel"
 identifier = "io.celestialtech.BelkaTunnel"
 icon = ["assets/AppIcon.icns"]
-version = "0.1.0"
+version = "0.2.0"
 copyright = "Copyright (c) 2026 Pasha"
 category = "Utility"
 short_description = "SSH SOCKS5 tunnel daemon"
