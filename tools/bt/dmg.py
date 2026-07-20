@@ -1,9 +1,9 @@
 """DMG installer build.
 
 Produces app/dist/BelkaTunnel-<version>.dmg with:
-  - BelkaTunnel.app on the left
-  - /Applications symlink on the right
-  - 800×448 window, hidden chrome (no toolbar/sidebar/status bar)
+  - BelkaTunnel.app on the left, /Applications symlink on the right
+  - README.md + README.ru.md below (docs ship inside the installer)
+  - 800×480 window, hidden chrome (no toolbar/sidebar/status bar)
   - No background image — Finder forces black labels whenever one is set
     (see project_belka_tunnel_dmg memory). Without a background, label
     colour follows the user's system theme.
@@ -60,6 +60,29 @@ def build_dmg() -> Path:
         out.unlink()
     util.step(f"building installer → {out.name}")
 
+    # Ship the user-facing docs inside the installer window so the DMG is
+    # self-documenting — README.md (English) + README.ru.md (Russian) sit
+    # below the app. Only include the ones that actually exist so a partial
+    # checkout still builds.
+    doc_files = [
+        p
+        for p in (util.REPO_ROOT / "README.md", util.REPO_ROOT / "README.ru.md")
+        if p.exists()
+    ]
+    # Two-row layout: app + /Applications on top, docs centred below.
+    win_w, win_h = 800, 480
+    app_pos = (200, 185)
+    apps_pos = (600, 185)
+    doc_positions = {
+        "README.md": (300, 355),
+        "README.ru.md": (500, 355),
+    }
+    doc_files_repr = ", ".join(repr(str(p)) for p in doc_files)
+    doc_locations_src = "".join(
+        f"    {p.name!r}: {doc_positions.get(p.name, (400, 355))!r},\n"
+        for p in doc_files
+    )
+
     # dmgbuild reads a Python "settings file" with module-level assignments.
     # We generate one in a temp dir so the build is reproducible from CI without
     # checking generated artifacts in.
@@ -73,8 +96,8 @@ def build_dmg() -> Path:
 application = {str(bundle)!r}
 appname = "BelkaTunnel.app"
 
-# Volume contents
-files = [application]
+# Volume contents — app, the /Applications drop target, and the docs.
+files = [application, {doc_files_repr}]
 symlinks = {{"Applications": "/Applications"}}
 hide_extension = [appname]
 
@@ -84,13 +107,13 @@ filesystem = "HFS+"
 size = "300M"
 
 icon = {str(icon)!r}
-window_rect = ((100, 100), {WINDOW_SIZE!r})
+window_rect = ((100, 100), {(win_w, win_h)!r})
 icon_size = {ICON_SIZE}
 text_size = {TEXT_SIZE}
 icon_locations = {{
-    appname:        {APP_ICON_POS!r},
-    "Applications": {APPLICATIONS_ICON_POS!r},
-}}
+    appname:        {app_pos!r},
+    "Applications": {apps_pos!r},
+{doc_locations_src}}}
 
 default_view = "icon-view"
 show_status_bar = False

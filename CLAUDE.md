@@ -272,9 +272,14 @@ because the policies.json generator uses a large `serde_json::json!{...}`.
   what we want. The `WindowAppearance=NSAppearanceNameDarkAqua` `.DS_Store`
   injection that lived here briefly is dead code per the same investigation
   and only kept for historical reference; deleting it is fine.
-- `BelkaTunnel.app` at (200, 240); `/Applications` symlink at (600, 240).
+- Two-row layout in an 800×480 window: `BelkaTunnel.app` at (200, 185) +
+  `/Applications` symlink at (600, 185) on top; **`README.md` at (300, 355) and
+  `README.ru.md` at (500, 355) below** — the user-facing docs ship inside the
+  installer (added to dmgbuild's `files` list; only the READMEs that exist are
+  included, so a partial checkout still builds).
 - Window chrome hidden, volume name `БелкаТуннель`, compressed UDZO.
-- ~7.5 MB output, built via `dmgbuild` (deterministic, no AppleScript).
+- ~14 MB output (universal binary), built via `dmgbuild` (deterministic, no
+  AppleScript).
 
 ### Icons
 
