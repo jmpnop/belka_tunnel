@@ -177,7 +177,7 @@ some sites. We lock it to `en-US`:
 
 ### Verifying the scrub
 Open Firefox after install/reinstall, visit:
-- <https://browserleaks.com/ip> → IP = 173.77.254.243, headers should show `Accept-Language: en-US,en;q=0.5`, timezone UTC, language en-US.
+- <https://browserleaks.com/ip> → IP = 203.0.113.10, headers should show `Accept-Language: en-US,en;q=0.5`, timezone UTC, language en-US.
 - <https://www.whatismybrowser.com/detect/what-is-my-language> → reports en-US.
 - `about:config?filter=intl.` → `intl.accept_languages` and `intl.locale.requested` shown as locked.
 
@@ -254,7 +254,7 @@ Visit one of these to see what sites see:
 - <https://amiunique.org> — overall uniqueness percentile.
 
 Behind БелкаТуннель + this policy you should see:
-- IP: tunnel exit (173.77.254.243)
+- IP: tunnel exit (203.0.113.10)
 - Timezone: UTC
 - Language: en-US
 - WebRTC: no candidates
@@ -322,7 +322,7 @@ the tunnel exit's country. Faking requires either:
   don't — they ask the JS API first).
 
 Conclusion: with the policy block + WebRTC fix + resistFingerprinting, what
-sites see is "no location, no fingerprint, IP says 173.77.254.243". That's
+sites see is "no location, no fingerprint, IP says 203.0.113.10". That's
 the tunnel exit; everything else is silent.
 
 ---
@@ -439,9 +439,9 @@ Example: force-install a custom add-on signed via your own AMO account:
 ```json
 "ExtensionSettings": {
   "*": { "installation_mode": "blocked" },
-  "belkatunnel@celestialtech.io": {
+  "belkatunnel@example.com": {
     "installation_mode": "force_installed",
-    "install_url": "https://celestialtech.io/firefox/belkatunnel.xpi"
+    "install_url": "https://example.com/firefox/belkatunnel.xpi"
   }
 }
 ```

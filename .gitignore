@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# Private deployment reference — real endpoints/accounts/fingerprints.
+# Never commit or ship this; the public docs use placeholders instead.
+DEPLOYMENT.md
+
 # Python (uv harness)
 __pycache__/
 *.pyc
