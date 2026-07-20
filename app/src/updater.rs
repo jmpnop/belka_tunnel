@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 
 /// Default upstream — can be overridden at runtime via the `BELKA_UPDATE_URL`
 /// env var (used by tests).
-pub const RELEASES_URL: &str = "https://api.github.com/repos/jmpnop/belka-tunnel/releases/latest";
+pub const RELEASES_URL: &str = "https://api.github.com/repos/jmpnop/belka_tunnel/releases/latest";
 
 #[derive(Debug, Clone)]
 pub struct UpdateInfo {
