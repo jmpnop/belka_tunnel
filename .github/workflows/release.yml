@@ -1,9 +1,16 @@
 name: release
 
-# Triggered by `git push origin vX.Y.Z`. Builds both apps as universal
-# binaries, signs + notarizes if the right secrets are present (no-ops
-# locally without them so the workflow stays usable from forks), and
-# attaches the two DMGs to a GitHub release named after the tag.
+# Triggered by `git push origin vX.Y.Z`. Runs on OUR self-hosted macOS runner
+# (this repo's build Mac) — NOT GitHub-hosted runners, which are billed and
+# blocked by the account's billing lock. The runner builds both apps as
+# universal binaries, signs + notarizes if the right secrets are present
+# (no-ops without them → ad-hoc DMGs), and attaches the two DMGs to a GitHub
+# release named after the tag.
+#
+# NOTE: the `secrets` context is NOT available in step `if:` conditions, so
+# signing/notarization are gated on outputs of the "Detect signing" step
+# (which CAN read secrets via step `env`). Referencing `secrets` in an `if:`
+# makes GitHub reject the whole file at parse time — do not reintroduce it.
 
 on:
   push:
@@ -13,56 +20,48 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    # Our Mac. Labels: self-hosted + the OS. The runner is registered by
+    # scripts/setup-runner.sh. If this ever needs to fan out to more than one
+    # build Mac, add a distinguishing label here.
+    runs-on: [self-hosted, macOS]
     permissions:
       contents: write   # uploading release assets
 
     env:
-      CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 10
       RUST_BACKTRACE: short
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry + workspace target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-ws-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-ws-
+      # secrets are readable in step `env` (unlike `if:`), so we turn them
+      # into plain boolean outputs the later steps can gate on.
+      - name: Detect signing capability
+        id: caps
+        env:
+          SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+        run: |
+          if [ -n "$SIGN_IDENTITY" ]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No SIGN_IDENTITY secret — producing ad-hoc-signed DMGs."
+          fi
+          if [ -n "$SIGN_IDENTITY" ] && [ -n "$APPLE_ID" ]; then
+            echo "notarize=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Install Rust + cross-compile targets
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-
-      - name: uv sync (harness deps)
-        run: uv sync --project tools --dev
-
+      # The build Mac already has rust + uv + brew (dmgbuild) installed; ./bt
+      # bootstraps its own uv venv and self-adds the cross-compile targets. No
+      # toolchain-install or cache actions needed on a persistent self-hosted
+      # runner.
       - name: bt precommit (sanity gate)
         run: ./bt precommit
 
-      # ---------- Signing identity ----------
-      # Only runs if the maintainer set the certificates secret; without
-      # it, builds remain ad-hoc-signed (Gatekeeper warning on download).
-      - name: Import codesigning certs
-        if: ${{ secrets.CERTIFICATES_P12 != '' }}
-        uses: apple-actions/import-codesign-certs@v3
-        with:
-          p12-file-base64: ${{ secrets.CERTIFICATES_P12 }}
-          p12-password: ${{ secrets.CERTIFICATES_P12_PASSWORD }}
-
-      # ---------- БелкаТуннель build ----------
-      # `bt bundle` cross-builds arm64 + x86_64 and lipos them itself — there
-      # is no thin path. `bt verify bundle` hard-fails if the result is not fat.
+      # ---------- БелкаТуннель ----------
       - name: bt bundle (universal)
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
@@ -77,9 +76,7 @@ jobs:
       - name: bt verify dmg
         run: ./bt verify dmg
 
-      # ---------- pfUsers build ----------
-      # Also universal — `bt bundle-pfusers` cross-builds + lipos pfusers, and
-      # `bt verify pfusers` hard-fails on a thin binary.
+      # ---------- pfUsers ----------
       - name: bt bundle-pfusers (universal)
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
@@ -94,12 +91,11 @@ jobs:
       - name: bt verify pfusers-dmg
         run: ./bt verify pfusers-dmg
 
-      # ---------- Notarize ----------
-      # Only runs if BOTH a signing identity and the notary creds are
-      # set — Apple notarytool refuses an ad-hoc-signed binary. The
-      # `bt notarize` step (when wired) hits app/dist/*.dmg in place.
+      # ---------- Notarize (only with a signing identity + notary creds) ----------
+      # On a self-hosted Mac the Developer ID key lives in the login keychain,
+      # so bt signs with SIGN_IDENTITY directly — no p12 import step needed.
       - name: Store notarytool credentials
-        if: ${{ secrets.APPLE_ID != '' && secrets.SIGN_IDENTITY != '' }}
+        if: steps.caps.outputs.notarize == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -111,7 +107,7 @@ jobs:
             --password "$APPLE_APP_PASSWORD"
 
       - name: Notarize + staple (BelkaTunnel)
-        if: ${{ secrets.SIGN_IDENTITY != '' && secrets.APPLE_ID != '' }}
+        if: steps.caps.outputs.notarize == 'true'
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
           NOTARY_PROFILE: BELKA-NOTARY
