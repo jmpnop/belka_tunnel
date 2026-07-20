@@ -1,17 +1,19 @@
 # БелкаТуннель
 
-Setting up an SSH-based SOCKS5 proxy that routes Olga's traffic through Pasha's pfSense WAN IP. The native macOS app under `app/` is `БелкаТуннель`; the working directory is `~/RustRoverProjects/belka_tunnel/` (migrated from the original `~/PycharmProjects/ssh-proxy-wan/` once the project outgrew Python tooling).
+Setting up an SSH-based SOCKS5 proxy that routes the client's traffic through the operator's pfSense WAN IP. The native macOS app under `app/` is `БелкаТуннель`; the working directory is `~/RustRoverProjects/belka_tunnel/` (migrated from the original `~/PycharmProjects/ssh-proxy-wan/` once the project outgrew Python tooling).
+
+> **Privacy note:** this repo is public, so the real account name, endpoints, WAN IP, host-key fingerprint, and Cloudflare IDs have been replaced throughout the docs with placeholders (`tunneluser`, `proxy.example.com`, `example.com`, `203.0.113.10`, etc.). The real values live in `DEPLOYMENT.md` — **gitignored, local-only, never shipped**. Substitute from there when operating the live deployment.
 
 **Repo:** https://github.com/jmpnop/belka_tunnel — current release is `v0.2.0` with `BelkaTunnel-0.2.0.dmg` attached (adds the HTTP/HTTPS forward proxy alongside SOCKS5; built + published locally via `./bt dmg` + `gh release create` since the tag-triggered `release.yml` workflow currently has a file issue). `v0.1.0` was the initial release. Earlier `jmpnop/belka-tunnel` was deleted and history rewritten to strip co-author trailers on 2026-05-29.
 
-The repo grew a small companion tool — **pfUsers** under `pfusers/` — for managing the router-side tunnel user accounts (created when olga needed her `user-shell-access` priv tightened to `user-ssh-tunnel`). It's documented later in this file under *Native macOS app — pfUsers*, and shares the Zed-inspired theme via `crates/belka-ui/`. BelkaTunnel itself is the project; pfUsers is in service of it.
+The repo grew a small companion tool — **pfUsers** under `pfusers/` — for managing the router-side tunnel user accounts (created when the client needed her `user-shell-access` priv tightened to `user-ssh-tunnel`). It's documented later in this file under *Native macOS app — pfUsers*, and shares the Zed-inspired theme via `crates/belka-ui/`. BelkaTunnel itself is the project; pfUsers is in service of it.
 
 Architecture:
 
 ```
-Olga's Mac (any network)  ──ssh -D 1080──▶  pfSense WAN  ──▶  internet
-  Firefox → 127.0.0.1:1080         aurora.celestialtech.io
-                                  (→ 173.77.254.243, kept current via
+the client's Mac (any network)  ──ssh -D 1080──▶  pfSense WAN  ──▶  internet
+  Firefox → 127.0.0.1:1080         proxy.example.com
+                                  (→ 203.0.113.10, kept current via
                                      Cloudflare DDNS) on port 22222
 ```
 
@@ -19,14 +21,14 @@ Olga's Mac (any network)  ──ssh -D 1080──▶  pfSense WAN  ──▶  in
 
 | Role          | Address                          | Notes                                    |
 |---------------|----------------------------------|------------------------------------------|
-| pfSense WAN   | `173.77.254.243:22222`           | sshd moved from 22 → 22222 on 2026-05-28 |
-| DDNS hostname | `aurora.celestialtech.io`        | Cloudflare-hosted A-record, TTL 60       |
+| pfSense WAN   | `203.0.113.10:22222`           | sshd moved from 22 → 22222 on 2026-05-28 |
+| DDNS hostname | `proxy.example.com`        | Cloudflare-hosted A-record, TTL 60       |
 | pfSense LAN   | `192.168.1.1:22222`              | LAN admin via anti-lockout rule          |
-| LAN admin     | `192.168.1.131`                  | Pasha's Mac                              |
-| Client user   | `olgatimoshevskaia`              | pfSense user (uid 2000), shell `/bin/tcsh` |
+| LAN admin     | `192.168.1.131`                  | the operator's Mac                              |
+| Client user   | `tunneluser`              | pfSense user (uid 2000), shell `/bin/tcsh` |
 | Admin user    | `admin`                          | pfSense root                             |
 
-Host key fingerprint (ed25519): `SHA256:iysgoGJhPPThFhj51DfJmGMmSC/Q4I7LAybLJ31fteI`
+Host key fingerprint (ed25519): `SHA256:REDACTED-see-DEPLOYMENT.md`
 
 ## pfSense state
 
@@ -44,26 +46,26 @@ Host key fingerprint (ed25519): `SHA256:iysgoGJhPPThFhj51DfJmGMmSC/Q4I7LAybLJ31f
 ### 1. WAN firewall rule (added via `pfSsh.php`)
 
 ```
-pass in quick on igb0 inet proto tcp from any to 173.77.254.243 port = 22222
+pass in quick on igb0 inet proto tcp from any to 203.0.113.10 port = 22222
   label "USER_RULE: SSH (22222) from WAN - added via API"
 ```
 
-Source = any (per user choice; consider tightening to Olga's public IP later).
+Source = any (per user choice; consider tightening to the client's public IP later).
 
-### 2. Olga's user provisioning
+### 2. the client's user provisioning
 
 - Authorized key (already present in pfSense User Manager):
-  `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMOH1Tl4At42ihChSJZBEGfBq1a9ngoB/c4UFzMCePMJ pfsense-tunnel`
+  `ssh-ed25519 REDACTED-PUBLIC-KEY pfsense-tunnel`
 - Privilege: **`user-ssh-tunnel`** (swapped from `user-shell-access` via pfUsers on 2026-05-29 — see [pfUsers section](#native-macos-app--pfusers-pfusers)). pfSense's `derive_shell` ladder maps this to `/usr/local/sbin/ssh_tunnel_shell`, so port forwarding (`-D`, `-L`, `-R`) works but interactive `exec` is blocked.
 - System account provisioned via `local_user_set()`:
   - `/etc/passwd` entry, shell `/usr/local/sbin/ssh_tunnel_shell`
-  - Home `/home/olgatimoshevskaia` with `.ssh/authorized_keys`
+  - Home `/home/tunneluser` with `.ssh/authorized_keys`
 - No Web UI / OS password: pfUsers writes a random throwaway bcrypt-hash on creation and immediately drops the plaintext. pfSense's web UI login is mathematically impossible for tunnel users.
 
 ### 3. Cloudflare DDNS
 
-- Zone: `celestialtech.io` (id `22e6b3f175e078c6aefc14c2d7d313c5`)
-- Hostname: `aurora.celestialtech.io` (A-record id `36fee5206b9452a648a624288c94e121`, TTL 60, proxy off)
+- Zone: `example.com` (id `REDACTED-ZONE-ID`)
+- Hostname: `proxy.example.com` (A-record id `REDACTED-RECORD-ID`, TTL 60, proxy off)
 - Cloudflare API token: stored in `.env` (`CLOUDFLARE_API_TOKEN`), `Zone:DNS:Edit` scope, zone-restricted.
 - pfSense DDNS client: provider `cloudflare`, monitors WAN interface, will update the A-record when WAN IP changes.
 - Old NoIP entry (`pin3.hopto.org`) disabled in pfSense config but not deleted.
@@ -71,7 +73,7 @@ Source = any (per user choice; consider tightening to Olga's public IP later).
 Client command now uses the hostname:
 
 ```
-ssh -p 22222 -D 1080 -C -N olgatimoshevskaia@aurora.celestialtech.io
+ssh -p 22222 -D 1080 -C -N tunneluser@proxy.example.com
 ```
 
 ### 4. Config backup
@@ -81,19 +83,17 @@ Pre-change backup at:
 
 Rollback: restore via *Diagnostics → Backup & Restore → Config History* in the web UI, or `cp` it over `/cf/conf/config.xml` and run `/etc/rc.reload_all`.
 
-## Olga's client
+## Client-side setup
 
 Command:
 
 ```
-ssh -p 22222 -D 1080 -C -N olgatimoshevskaia@aurora.celestialtech.io
+ssh -p 22222 -D 1080 -C -N tunneluser@proxy.example.com
 ```
 
 Flags: `-D 1080` = SOCKS5 on local 1080. `-C` = compression. `-N` = no remote command. Add `-v` for verbose, omit `-q` so host-key prompt is interactive on first connect.
 
-The hostname `aurora.celestialtech.io` is kept pointed at the current WAN IP by Cloudflare DDNS (see *Changes applied → Cloudflare DDNS*). If you ever need to bypass DNS for testing, the bare IP at time of writing is `173.77.254.243`.
-
-**Common typo:** `olgatimoshev**k**aia` (wrong) vs `olgatimoshev**sk**aia` (correct).
+The hostname `proxy.example.com` is kept pointed at the current WAN IP by Cloudflare DDNS (see *Changes applied → Cloudflare DDNS*). If you ever need to bypass DNS for testing, the bare IP at time of writing is `203.0.113.10`.
 
 ### Firefox setup (Settings → Network → Connection Settings)
 
@@ -102,11 +102,11 @@ The hostname `aurora.celestialtech.io` is kept pointed at the current WAN IP by 
 - SOCKS v5
 - ✅ Proxy DNS when using SOCKS v5
 
-Test: `https://ifconfig.me` should return the current WAN IP of pfSense (currently `173.77.254.243`; equivalent to `dig +short aurora.celestialtech.io @1.1.1.1`).
+Test: `https://ifconfig.me` should return the current WAN IP of pfSense (currently `203.0.113.10`; equivalent to `dig +short proxy.example.com @1.1.1.1`).
 
 ### Known issue: IPv6 port 1080 conflict
 
-On Olga's Mac, `bind [::1]:1080: Address already in use` — some other process is bound to IPv6 localhost:1080. SSH falls back to IPv4 (`127.0.0.1:1080`), so the tunnel works. If Firefox prefers IPv6 and hits the rogue process instead, find it:
+On the client's Mac, `bind [::1]:1080: Address already in use` — some other process is bound to IPv6 localhost:1080. SSH falls back to IPv4 (`127.0.0.1:1080`), so the tunnel works. If Firefox prefers IPv6 and hits the rogue process instead, find it:
 
 ```
 lsof -iTCP:1080 -sTCP:LISTEN
@@ -116,8 +116,8 @@ Kill it, re-run the SSH command.
 
 ## Diagnostics performed (path to resolution)
 
-1. `nc -zv 173.77.254.243 22222` from LAN → succeeded (anti-lockout matched).
-2. `ssh -vvv … olgatimoshevkaia@…` from Olga → hung at "Local version string …", then variously RST'd or timed out.
+1. `nc -zv 203.0.113.10 22222` from LAN → succeeded (anti-lockout matched).
+2. `ssh -vvv … tunneluser@…` from the client → hung at "Local version string …", then variously RST'd or timed out.
 3. Root cause: no WAN firewall rule for port 22222; user had no shell-access privilege; (and username typo).
 
 ## Useful one-liners
@@ -137,11 +137,11 @@ exec
 exit
 EOF'
 
-# Verify tunnel from Olga's Mac (in another terminal while ssh -D 1080 runs)
+# Verify tunnel from the client's Mac (in another terminal while ssh -D 1080 runs)
 curl --socks5-hostname localhost:1080 https://ifconfig.me
 
 # Confirm DDNS hostname currently resolves to pfSense WAN
-dig +short aurora.celestialtech.io @1.1.1.1
+dig +short proxy.example.com @1.1.1.1
 
 # Force pfSense to push current WAN IP to Cloudflare (run on pfSense)
 ssh -p 22222 admin@192.168.1.1 'rm -f /var/db/dyndns_*.cache && /usr/local/bin/php-cgi -q /etc/rc.dyndns.update; tail -20 /var/log/system.log | grep -i dyndns'
@@ -226,7 +226,7 @@ client, no app on the phone, nothing but the OS proxy fields.
    (HTTP) fields.
 
 Verify from the phone: load `https://ifconfig.me` — it should show the pfSense
-WAN IP (`dig +short aurora.celestialtech.io @1.1.1.1`), proving the traffic exits
+WAN IP (`dig +short proxy.example.com @1.1.1.1`), proving the traffic exits
 through the tunnel, not the phone's own connection.
 
 **Security note:** on `0.0.0.0` with **no proxy auth**, *anyone* who can reach the
@@ -320,7 +320,7 @@ There is **no `--config` flag** — the binary always loads `ConfigFile::default
 
 ### Defaults baked in
 
-Match the working CLI command: `olgatimoshevskaia@aurora.celestialtech.io:22222`, key `~/.ssh/id_ed25519`, SOCKS5 at `0.0.0.0:1080`, **HTTP/HTTPS proxy at `0.0.0.0:8080`** (`enabled: true`), 30 s keepalive, exponential reconnect backoff. On first launch the daemon writes the active config to disk so it can be edited. (Listening on `0.0.0.0` makes both proxies reachable from the LAN — this is what lets a phone or another Mac use the tunnel; see *LAN clients (phone, another Mac)* above. Flip the menu's "Listen on all interfaces" off, or edit `listen_addr` to `127.0.0.1`, for loopback-only.)
+Match the working CLI command: `tunneluser@proxy.example.com:22222`, key `~/.ssh/id_ed25519`, SOCKS5 at `0.0.0.0:1080`, **HTTP/HTTPS proxy at `0.0.0.0:8080`** (`enabled: true`), 30 s keepalive, exponential reconnect backoff. On first launch the daemon writes the active config to disk so it can be edited. (Listening on `0.0.0.0` makes both proxies reachable from the LAN — this is what lets a phone or another Mac use the tunnel; see *LAN clients (phone, another Mac)* above. Flip the menu's "Listen on all interfaces" off, or edit `listen_addr` to `127.0.0.1`, for loopback-only.)
 
 ### Known limitations / open items
 
@@ -378,7 +378,7 @@ Every write is wrapped by `write_with_safety`:
 4. Invoke pfSense's own PHP parser once: `php -r 'require_once("config.inc"); parse_config(true); echo count($config["system"]["user"]);'` and compare to the expected post-mutation count. **This is the only PHP call in pfusers** and exists purely as a parser-agreement check.
 5. On any failure in 2/3/4: `cp` the snapshot back. Router sees the exact bytes it had before the call.
 
-Verified end-to-end against the live router (commit `46f8227`): olga's `user-shell-access` → `user-ssh-tunnel` swap landed cleanly through the full pipeline. The PHP-verify command must NOT pass `-d include_path=…` — pfSense's default `include_path` includes `/usr/local/share/pear` where `Net/IPv6.php` lives, and our earlier override stripped that, breaking `require_once`.
+Verified end-to-end against the live router (commit `46f8227`): the client's `user-shell-access` → `user-ssh-tunnel` swap landed cleanly through the full pipeline. The PHP-verify command must NOT pass `-d include_path=…` — pfSense's default `include_path` includes `/usr/local/share/pear` where `Net/IPv6.php` lives, and our earlier override stripped that, breaking `require_once`.
 
 ### What the GUI exposes (scope discipline)
 
@@ -388,7 +388,7 @@ The Add User dialog asks for: username, full name (optional), initial SSH key (o
 
 **Removed by design** (each closing a UX hole):
 - Group memberships card — only `all` (implicit) and `admins` (root, page-all) exist on this router; non-admin users belong in neither beyond `all`. Engine still supports group edits via `Mutation::{AddGroupMember, RemoveGroupMembership}` if a future deployment introduces real custom groups.
-- Password / Reset password card — pfSense uses `<bcrypt-hash>` only for Web UI login; Pasha's sshd is `PasswordAuthentication=no`, and tunnel users don't touch the web UI. `pfsense::set_password` remains in the engine.
+- Password / Reset password card — pfSense uses `<bcrypt-hash>` only for Web UI login; the operator's sshd is `PasswordAuthentication=no`, and tunnel users don't touch the web UI. `pfsense::set_password` remains in the engine.
 - Add User priv toggles (`Shell access`, `Web UI (page-all)`) — every user pfUsers creates is by definition a tunnel user. `spawn_add_user` pins `priv_list` to `["user-ssh-tunnel"]`.
 - Add User password field — tunnel users have no password story (next bullet).
 - Admin row (uid 0) in the sidebar — touching uid 0 from here is footgun territory. Filter is GUI-side, not engine-side, so the PHP-verify count match still works.
@@ -409,7 +409,7 @@ cargo test --release -p pfusers swap_olga_priv_live -- --ignored --nocapture
                               # live-router integration test against admin@192.168.1.1
 ```
 
-The live test (`#[ignore]` by default) connects to the real router, asserts olga's current priv, swaps it to `user-ssh-tunnel`, asserts the post-write state. Useful as the canonical "does the four-layer wrapper still work end-to-end?" check after non-trivial pfsense.rs edits.
+The live test (`#[ignore]` by default) connects to the real router, asserts the client's current priv, swaps it to `user-ssh-tunnel`, asserts the post-write state. Useful as the canonical "does the four-layer wrapper still work end-to-end?" check after non-trivial pfsense.rs edits.
 
 ### Run
 
@@ -430,15 +430,15 @@ RUST_LOG=info pfusers/dist/pfUsers.app/Contents/MacOS/pfusers
 - **No Add-or-Edit groups UI.** If a real `vpn-users` group ever materialises on the router, the GUI needs the membership card back (engine support remains).
 - **Single-router scope.** pfusers connects to one endpoint at a time. Multi-router support would mean a profile concept in `config.json`, similar to БелкаТуннель.
 
-## Olga's `~/.ssh/config` (recommended)
+## the client's `~/.ssh/config` (recommended)
 
 Saves typing and standardizes flags. Then she can just run `ssh wan-proxy`.
 
 ```
 Host wan-proxy
-    HostName aurora.celestialtech.io
+    HostName proxy.example.com
     Port 22222
-    User olgatimoshevskaia
+    User tunneluser
     IdentityFile ~/.ssh/id_ed25519
     IdentitiesOnly yes
     DynamicForward 1080
@@ -449,26 +449,26 @@ Host wan-proxy
     ExitOnForwardFailure yes
 ```
 
-## Keeping the tunnel up automatically (Olga's Mac)
+## Keeping the tunnel up automatically (the client's Mac)
 
 ### Option 1 — `autossh` (simplest)
 
 ```
 brew install autossh
 autossh -M 0 -f -N -D 1080 -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3" \
-    -p 22222 olgatimoshevskaia@aurora.celestialtech.io
+    -p 22222 tunneluser@proxy.example.com
 ```
 
 ### Option 2 — launchd agent (survives reboots, no Homebrew)
 
-`~/Library/LaunchAgents/com.olga.ssh-proxy.plist`:
+`~/Library/LaunchAgents/com.client.ssh-proxy.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key><string>com.olga.ssh-proxy</string>
+    <key>Label</key><string>com.client.ssh-proxy</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/ssh</string>
@@ -486,20 +486,20 @@ autossh -M 0 -f -N -D 1080 -o "ServerAliveInterval 30" -o "ServerAliveCountMax 3
 </plist>
 ```
 
-Load: `launchctl load ~/Library/LaunchAgents/com.olga.ssh-proxy.plist`
-Unload: `launchctl unload ~/Library/LaunchAgents/com.olga.ssh-proxy.plist`
+Load: `launchctl load ~/Library/LaunchAgents/com.client.ssh-proxy.plist`
+Unload: `launchctl unload ~/Library/LaunchAgents/com.client.ssh-proxy.plist`
 Logs: `tail -f /tmp/ssh-proxy.err`
 
 ## Hardening — tunnel-only access
 
-**The original sshd `Match` block approach is superseded.** As of 2026-05-29 olga has the pfSense priv `user-ssh-tunnel` (set via pfUsers; see the pfUsers section below). That priv causes pfSense's `local_user_set` to assign `/usr/local/sbin/ssh_tunnel_shell` as her login shell, which permits TCP forwarding (so `-D 1080` SOCKS5 works) but refuses any `exec` request. No `/etc/ssh/sshd_config` edits required — and crucially no need to keep the sshd_config patch in sync across pfSense regenerations.
+**The original sshd `Match` block approach is superseded.** As of 2026-05-29 the client has the pfSense priv `user-ssh-tunnel` (set via pfUsers; see the pfUsers section below). That priv causes pfSense's `local_user_set` to assign `/usr/local/sbin/ssh_tunnel_shell` as her login shell, which permits TCP forwarding (so `-D 1080` SOCKS5 works) but refuses any `exec` request. No `/etc/ssh/sshd_config` edits required — and crucially no need to keep the sshd_config patch in sync across pfSense regenerations.
 
 If you ever need to apply the same hardening to a new user, the canonical move is to set their priv to `user-ssh-tunnel` via pfUsers (or the pfSense Web UI under System → User Manager). The sshd_config Match block below is kept for historical reference only:
 
 <details><summary>(historical) Match block approach</summary>
 
 ```
-Match User olgatimoshevskaia
+Match User tunneluser
     PermitTTY no
     X11Forwarding no
     AllowAgentForwarding no
@@ -512,12 +512,12 @@ Issue: pfSense regenerates `/etc/ssh/sshd_config` from `config.xml` on reload, s
 
 </details>
 
-## Health check (Olga's Mac)
+## Health check (the client's Mac)
 
 ```bash
 #!/bin/bash
 # ssh-proxy-check.sh — compares tunnel exit IP against current DDNS A-record
-EXPECTED=$(dig +short aurora.celestialtech.io @1.1.1.1 | tail -1)
+EXPECTED=$(dig +short proxy.example.com @1.1.1.1 | tail -1)
 ACTUAL=$(curl -s --max-time 5 --socks5-hostname localhost:1080 https://ifconfig.me)
 if [[ -n "$EXPECTED" && "$ACTUAL" == "$EXPECTED" ]]; then
     echo "OK: tunnel up, exit IP $ACTUAL == DDNS $EXPECTED"
@@ -534,12 +534,12 @@ fi
 |-------------------------------------------------------|-----------------------------------------------|--------------------------------------------------------------------|
 | `Connection timed out during banner exchange`         | No WAN allow rule, or upstream drop           | Verify rule `pfctl -sr \| grep 22222`                              |
 | `Connection reset by peer` during KEX                 | sshguard ban, or rate-limit                   | `pfctl -t sshguard -T show`; delete the IP if listed               |
-| `Host key verification failed`                        | known_hosts entry for hostname/IP missing or mismatched | `ssh-keyscan -p 22222 -t ed25519 aurora.celestialtech.io >> ~/.ssh/known_hosts` |
+| `Host key verification failed`                        | known_hosts entry for hostname/IP missing or mismatched | `ssh-keyscan -p 22222 -t ed25519 proxy.example.com >> ~/.ssh/known_hosts` |
 | `Permission denied (publickey)`                       | Key not in pfSense user's authorized_keys, or user lacks `user-shell-access` privilege | Re-add key in User Manager; grant shell access |
 | `bind [::1]:1080: Address already in use`             | Another local process owns IPv6 port 1080    | `lsof -iTCP:1080 -sTCP:LISTEN`, kill or use different port         |
 | Firefox "proxy refusing connections"                  | SSH tunnel not actually running               | `lsof -iTCP:1080 -sTCP:LISTEN`; start ssh again                    |
 | Browser works but `ifconfig.me` shows real IP         | Browser bypassing proxy, or DNS leak          | Confirm "Proxy DNS when using SOCKS v5" is checked in Firefox      |
-| `Could not resolve hostname aurora.celestialtech.io`  | Cloudflare A-record gone / token revoked / pfSense DDNS broken | `dig +short aurora.celestialtech.io @1.1.1.1`; if empty, check Cloudflare DNS UI and pfSense *Services → Dynamic DNS* |
+| `Could not resolve hostname proxy.example.com`  | Cloudflare A-record gone / token revoked / pfSense DDNS broken | `dig +short proxy.example.com @1.1.1.1`; if empty, check Cloudflare DNS UI and pfSense *Services → Dynamic DNS* |
 | DDNS works but exit IP differs from `aurora` record   | pfSense hasn't pushed update yet after WAN IP change | Force update with the one-liner in *Useful one-liners* section     |
 
 ## pfSense log/diagnostic locations
@@ -565,15 +565,15 @@ fi
 ## Secrets
 
 - Cloudflare API token (`CLOUDFLARE_API_TOKEN`) lives in `.env` (mode 600, `.gitignore`d). It was pasted in chat once; rotate it at https://dash.cloudflare.com/profile/api-tokens once you're confident the setup is stable, and overwrite the value in `.env`.
-- The token's scope is `Zone:DNS:Edit` on `celestialtech.io` only — even leaked, the blast radius is bounded to DNS edits on this one zone.
+- The token's scope is `Zone:DNS:Edit` on `example.com` only — even leaked, the blast radius is bounded to DNS edits on this one zone.
 
 ## Open follow-ups
 
-- Tighten WAN rule to Olga's specific source IP (currently `any`).
-- ~~Apply the tunnel-only Match block above; verify it survives a pfSense config reload.~~ Superseded by olga's `user-ssh-tunnel` priv via pfUsers (commit `46f8227`).
-- Resolve the local `::1:1080` conflict on Olga's Mac.
+- Tighten WAN rule to the client's specific source IP (currently `any`).
+- ~~Apply the tunnel-only Match block above; verify it survives a pfSense config reload.~~ Superseded by the client's `user-ssh-tunnel` priv via pfUsers (commit `46f8227`).
+- Resolve the local `::1:1080` conflict on the client's Mac.
 - Decide whether to enable `LogLevel VERBOSE` in sshd_config for better audit trail.
-- Consider a second user / key for redundancy in case Olga's key is rotated.
+- Consider a second user / key for redundancy in case the client's key is rotated.
 - Rotate the Cloudflare API token now that the setup is verified (see *Secrets* above).
 - Remove the disabled NoIP entry from pfSense config once Cloudflare DDNS has run successfully through a real WAN-IP change.
 - **pfUsers**: build a release DMG (`bt dmg-pfusers` not yet implemented).

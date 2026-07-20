@@ -9,7 +9,7 @@ sees the router's address rather than the client's.
 
 ```
 Client Mac (any network)  ──native SSH──▶  pfSense WAN  ──▶  internet
-  Firefox → 127.0.0.1:1080 (SOCKS5)   aurora.celestialtech.io
+  Firefox → 127.0.0.1:1080 (SOCKS5)   proxy.example.com
   curl    → 127.0.0.1:8080 (HTTP)    (→ current WAN IP, kept fresh
                                         by Cloudflare DDNS) on port 22222
 ```
@@ -73,7 +73,7 @@ the same tunnel by pointing at the Mac's LAN IP (see
 
 On first launch it writes a default config to
 `~/Library/Application Support/io.celestialtech.BelkaTunnel/config.json`
-(matching the working CLI: `olgatimoshevskaia@aurora.celestialtech.io:22222`,
+(matching the working CLI: `tunneluser@proxy.example.com:22222`,
 key `~/.ssh/id_ed25519`, SOCKS5 on `0.0.0.0:1080`, HTTP on `0.0.0.0:8080`). Edit
 via the menu's **Edit Configuration** (a GUI editor); saving self-restarts the
 daemon.
@@ -98,7 +98,7 @@ curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
 Host `127.0.0.1` port `1080`, SOCKS v5, ✅ *Proxy DNS when using SOCKS v5*.
 
 All of the above should return the current pfSense WAN IP — compare against
-`dig +short aurora.celestialtech.io @1.1.1.1`.
+`dig +short proxy.example.com @1.1.1.1`.
 
 ### Share the tunnel with a phone / other devices
 
