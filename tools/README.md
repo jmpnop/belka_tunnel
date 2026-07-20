@@ -42,9 +42,11 @@ and resolve dependencies.
   whenever a background is set; without one, label colour follows the user's
   system theme (white in Dark, black in Light). The `.dmg` file's Finder icon is
   set to `app/assets/DmgIcon.icns` (embedded post-build via `NSWorkspace`).
-- `BelkaTunnel.app` placed at (200, 240); `/Applications` symlink at (600, 240).
+- `BelkaTunnel.app` at (200, 185); `/Applications` symlink at (600, 185);
+  `README.md` + `README.ru.md` below at (300, 355) / (500, 355) — the docs ship
+  inside the installer window.
 - Window chrome hidden (no toolbar, sidebar, status bar) for a clean install UI.
-- Volume name "БелкаТуннель", compressed (UDZO) → ~7.5 MB.
+- Volume name "БелкаТуннель", compressed (UDZO) → ~14 MB.
 
 `./bt verify dmg` mounts the latest DMG read-only and asserts:
 - `BelkaTunnel.app` is present.
