@@ -376,7 +376,7 @@ impl eframe::App for AboutApp {
                             .color(TITLE),
                     ));
                     ui.add(egui::Label::new(
-                        RichText::new("Squirrel.Tunnel · v0.1.0")
+                        RichText::new(concat!("Squirrel.Tunnel · v", env!("CARGO_PKG_VERSION")))
                             .size(12.5)
                             .color(SUBTITLE),
                     ));
