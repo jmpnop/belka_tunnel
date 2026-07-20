@@ -54,6 +54,19 @@ cp "bundle/Info.plist" "${APP}/Contents/Info.plist"
 cp "assets/AppIcon.icns" "${APP}/Contents/Resources/AppIcon.icns"
 chmod +x "${APP}/Contents/MacOS/${BIN_NAME}"
 
+# ---------- Stamp version from Cargo.toml (single source of truth) ----------
+# Cargo.toml [package].version drives env!("CARGO_PKG_VERSION") in the binary
+# (menu, About, update check). Stamp the SAME value into the bundled
+# Info.plist here so CFBundleShortVersionString can never drift from the code.
+PKG_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+if [ -n "$PKG_VERSION" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${PKG_VERSION}" \
+        "${APP}/Contents/Info.plist"
+    echo "==> stamped CFBundleShortVersionString = ${PKG_VERSION}"
+else
+    echo "==> WARNING: could not read version from Cargo.toml; plist left as-is" >&2
+fi
+
 # ---------- Codesign ----------
 
 if [ -n "${SIGN_IDENTITY:-}" ]; then
