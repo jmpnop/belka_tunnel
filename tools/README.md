@@ -19,7 +19,7 @@ and resolve dependencies.
 ./bt                     # show all commands
 ./bt build --release     # cargo build --release
 ./bt bundle              # release build + dist/BelkaTunnel.app
-./bt dmg                 # build dist/BelkaTunnel-<version>.dmg (voxel-tree bg)
+./bt dmg                 # build dist/BelkaTunnel-<version>.dmg (no bg image)
 ./bt lint                # cargo clippy -- -D warnings
 ./bt test                # cargo test --release
 ./bt verify bundle       # Info.plist keys, codesign, arch, icon
@@ -38,11 +38,13 @@ and resolve dependencies.
 ## DMG installer
 
 `./bt dmg` builds `app/dist/BelkaTunnel-<version>.dmg` via `dmgbuild`:
-- Background: `app/assets/dmg-background.png` (800×448) + `…@2x.png` (1600×900 retina).
-- `BelkaTunnel.app` placed at (200, 240) — over the left voxel tree.
-- `/Applications` symlink at (600, 240) — over the right voxel tree.
+- **No background image** — macOS Finder forces icon labels to render black
+  whenever a background is set; without one, label colour follows the user's
+  system theme (white in Dark, black in Light). The `.dmg` file's Finder icon is
+  set to `app/assets/DmgIcon.icns` (embedded post-build via `NSWorkspace`).
+- `BelkaTunnel.app` placed at (200, 240); `/Applications` symlink at (600, 240).
 - Window chrome hidden (no toolbar, sidebar, status bar) for a clean install UI.
-- Volume name "БелкаТуннель", compressed (UDZO) → ~12 MB.
+- Volume name "БелкаТуннель", compressed (UDZO) → ~7.5 MB.
 
 `./bt verify dmg` mounts the latest DMG read-only and asserts:
 - `BelkaTunnel.app` is present.

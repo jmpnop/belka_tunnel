@@ -172,7 +172,8 @@ A self-contained menu-bar app in Rust that maintains the tunnel without dependin
 - Hand-written HTTP/HTTPS forward proxy in `src/http.rs` — see *Proxy front-ends* below.
 - `tunnel::run_forever` is a reconnect loop with exponential backoff (1s → 2s → 4s … capped at `max_backoff_secs`); a watchdog task polls `Handle::is_closed()` every second and signals a shared `dead` `Notify` when the SSH session dies, tearing down both listeners so the loop trips fast on server-side disconnects.
 - Tokio multi-thread runtime owns the tunnel + both proxy servers; main thread runs the `tao` event loop with `tray-icon` (required by macOS for menu-bar integration). A bridge thread forwards `Status` changes from a `watch` channel into `UserEvent` notifications so the menu-bar title can react to state.
-- Menu-bar title: `●` Connected · `○` Connecting · `✕` Disconnected. Menu includes profile header, status row, SOCKS5 endpoints + copy, **HTTP-proxy-enabled toggle + HTTP endpoints + copy**, Listen-on-all-interfaces toggle (SOCKS listen address; the HTTP proxy has its own independent listen-address control in the GUI editor), Edit Configuration (opens GUI subprocess), Browse via tunnel (Firefox), Firefox install/uninstall, About, Quit. A file-system watcher on `config.json` self-restarts the daemon on save, so edits in the GUI editor apply without a manual click.
+- Menu-bar title: `●` Connected · `○` Connecting · `✕` Disconnected. Menu includes profile header; **status row (click it to toggle the tunnel on/off** — the `Status::Disabled`/gray state); SOCKS5 endpoints + copy; **HTTP-proxy-enabled toggle + HTTP endpoints + copy**; Listen-on-all-interfaces toggle (SOCKS listen address; the HTTP proxy has its own independent listen-address control in the GUI editor); Browse via tunnel (Firefox) submenu (launch / install-or-update from mozilla.org / install Homebrew when missing / uninstall); Edit Configuration (opens GUI subprocess); **Reveal Data Folder in Finder**; **Open Log File**; **Launch at Login** (per-user LaunchAgent, see below); About; Quit. A file-system watcher on `config.json` self-restarts the daemon on save, so edits in the GUI editor apply without a manual click. On startup a one-shot **update check** hits the GitHub Releases API and, if a newer tag exists, fires a notification + opens the release page.
+- **The SOCKS5/HTTP endpoint rows enumerate every LAN-reachable address** (via `collect_endpoints` → `local_ip_address`), not just loopback — so when a proxy listens on `0.0.0.0` the menu shows e.g. `127.0.0.1:1080 (loopback)` **and** `192.168.1.100:1080 (en0)`. That second address is what you hand to another device. See *LAN clients (phone, another Mac)* below.
 
 ### Proxy front-ends (SOCKS5 + HTTP/HTTPS)
 
@@ -200,6 +201,40 @@ curl -x http://127.0.0.1:8080 http://ifconfig.me
 # SOCKS5 (unchanged):
 curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
 ```
+
+### LAN clients (phone, another Mac) — sharing the tunnel over the local network
+
+Because both proxies default to `listen_addr: 0.0.0.0`, the Mac running
+БелкаТуннель acts as a **proxy gateway for every device on the same LAN/Wi-Fi**,
+not just for apps on that Mac. A phone, tablet, or second laptop can route its
+traffic out through the pfSense WAN by pointing at the host Mac's LAN IP — no SSH
+client, no app on the phone, nothing but the OS proxy fields.
+
+1. On the host Mac, open the menu — the SOCKS5 / HTTP endpoint rows list the
+   address to use, e.g. `192.168.1.100:1080 (en0)` (SOCKS5) and
+   `192.168.1.100:8080 (en0)` (HTTP). Use "Copy primary endpoint" or read the
+   `(en0)` row. (If only the `127.0.0.1 (loopback)` row shows, "Listen on all
+   interfaces" is off — turn it on.)
+2. On the **iPhone/iPad**: *Settings → Wi-Fi → (i) on the network → Configure
+   Proxy → Manual* → Server `192.168.1.100`, Port `8080` (the HTTP proxy — iOS
+   Wi-Fi proxy is HTTP-only, no SOCKS field). HTTPS rides through via CONNECT.
+3. On **another Mac**: *System Settings → Network → (interface) → Details →
+   Proxies* → enable *Web Proxy (HTTP)* + *Secure Web Proxy (HTTPS)* → same
+   `192.168.1.100:8080`; or use SOCKS via `--socks5-hostname 192.168.1.100:1080`
+   / an app that speaks SOCKS.
+4. **Android** honors the same Wi-Fi → Advanced → Proxy → Manual host:port
+   (HTTP) fields.
+
+Verify from the phone: load `https://ifconfig.me` — it should show the pfSense
+WAN IP (`dig +short aurora.celestialtech.io @1.1.1.1`), proving the traffic exits
+through the tunnel, not the phone's own connection.
+
+**Security note:** on `0.0.0.0` with **no proxy auth**, *anyone* who can reach the
+Mac on ports 1080/8080 can use the tunnel. That's fine on a trusted home LAN (the
+intended posture — the real perimeter is the LAN + the SSH tunnel), but on an
+untrusted/public network flip "Listen on all interfaces" **off** (loopback-only)
+or set `listen_addr` to `127.0.0.1`. macOS's own firewall / the LAN router is the
+only thing gating access.
 
 ### Build / test / harness — the `bt` CLI
 
@@ -280,12 +315,13 @@ There is **no `--config` flag** — the binary always loads `ConfigFile::default
 
 ### Defaults baked in
 
-Match the working CLI command: `olgatimoshevskaia@aurora.celestialtech.io:22222`, key `~/.ssh/id_ed25519`, SOCKS5 at `0.0.0.0:1080`, **HTTP/HTTPS proxy at `0.0.0.0:8080`** (`enabled: true`), 30 s keepalive, exponential reconnect backoff. On first launch the daemon writes the active config to disk so it can be edited. (Listening on `0.0.0.0` makes both proxies reachable from the LAN; flip the menu's "Listen on all interfaces" off, or edit `listen_addr` to `127.0.0.1`, for loopback-only.)
+Match the working CLI command: `olgatimoshevskaia@aurora.celestialtech.io:22222`, key `~/.ssh/id_ed25519`, SOCKS5 at `0.0.0.0:1080`, **HTTP/HTTPS proxy at `0.0.0.0:8080`** (`enabled: true`), 30 s keepalive, exponential reconnect backoff. On first launch the daemon writes the active config to disk so it can be edited. (Listening on `0.0.0.0` makes both proxies reachable from the LAN — this is what lets a phone or another Mac use the tunnel; see *LAN clients (phone, another Mac)* above. Flip the menu's "Listen on all interfaces" off, or edit `listen_addr` to `127.0.0.1`, for loopback-only.)
 
 ### Known limitations / open items
 
 - **Host key verification: trust-on-first-use** (commit `20b53ae`). First connect on a profile records the server's `SHA256:…` fingerprint into `host_key_fingerprint` in `config.json`; every subsequent connect requires an exact match. Mismatch → `Status::Disconnected("host key mismatch — …")` plus a one-shot macOS notification. The GUI editor's SSH section shows the recorded fingerprint as read-only with a "Forget" button (use after a legitimate server-key rotation; the daemon TOFUs the new key on the next connect).
-- **No autolaunch on login.** Add via launchd plist or macOS *Login Items* (Settings → General → Login Items → +).
+- **Autolaunch on login** is built in — the menu's **Launch at Login** toggle writes/removes a per-user LaunchAgent at `~/Library/LaunchAgents/io.celestialtech.BelkaTunnel.plist` (`RunAtLoad`, points at the running bundle's binary, resolves symlinks; toggle state = does the plist exist). Enable takes effect at the next login. (The manual launchd-plist / *Login Items* route below still works but is no longer necessary.)
+- **The startup update check points at a dead repo.** `updater.rs` polls `https://api.github.com/repos/jmpnop/belka-tunnel/releases/latest` — the **hyphen** repo that was deleted (the live repo is `belka_tunnel`, underscore). So the check currently always 404s / no-ops. Fix the `RELEASES_URL` const to the underscore repo before relying on in-app update notifications.
 
 ## Native macOS app — pfUsers (`pfusers/`)
 

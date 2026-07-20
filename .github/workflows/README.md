@@ -1,5 +1,15 @@
 # Release workflow
 
+> ⚠️ **`release.yml` is currently broken** — every tag-triggered run fails in
+> ~0s with GitHub's "workflow file issue" (a pre-existing problem). **Do not rely
+> on pushing a tag to produce a release.** Until it's fixed, build + publish
+> releases **locally**:
+> ```bash
+> ./bt bundle && ./bt dmg \
+>   && gh release create vX.Y.Z app/dist/BelkaTunnel-X.Y.Z.dmg
+> ```
+> The section below documents the *intended* workflow behaviour once repaired.
+
 `release.yml` is tag-driven. To cut a release:
 
 ```bash
