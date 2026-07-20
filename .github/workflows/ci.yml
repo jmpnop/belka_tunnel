@@ -1,7 +1,9 @@
 name: ci
 
-# Run on every push to main and on every PR. Catches breakage from
-# refactors before they land. Cheap — macos-14 + cached target/.
+# Runs on every push to main and every PR, on OUR self-hosted macOS runner
+# (this repo's build Mac) — NOT GitHub-hosted runners, which are billed and
+# blocked by the account's billing lock. Catches breakage from refactors
+# before they land.
 
 on:
   push:
@@ -16,51 +18,22 @@ concurrency:
 
 jobs:
   test:
-    runs-on: macos-14
+    runs-on: [self-hosted, macOS]
     env:
-      CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 10
       RUST_BACKTRACE: short
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache cargo registry + workspace target
-        uses: actions/cache@v4
-        with:
-          # Workspace target lives at the repo root now (not app/target/).
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-ws-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-ws-
-
-      - name: Install Rust + cross-compile targets
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          # Both apps bundle as universal (arm64 + x86_64) — even in CI, so the
-          # bundle steps exercise the real artifact and `bt verify` can assert
-          # the fat binary. `bt bundle` self-adds these targets too, but listing
-          # them here primes the toolchain cache.
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-
-      - name: uv sync (harness deps)
-        run: uv sync --project tools --dev
-
-      # The `bt precommit` step runs fmt-check + clippy + the test suite
-      # against the workspace. That's our single CI gate; if it passes,
-      # the workspace is in a publishable state.
+      # The build Mac already has rust + uv + brew installed; ./bt bootstraps
+      # its own uv venv and self-adds cross-compile targets. No toolchain-install
+      # or cache actions needed on a persistent self-hosted runner.
       - name: bt precommit (fmt + clippy + tests)
         run: ./bt precommit
 
       # Build both apps as UNIVERSAL bundles — catches bundling regressions
-      # (Info.plist, codesign, dmgbuild settings) the unit tests can't see, and
-      # `bt verify` hard-fails if either binary isn't a fat arm64+x86_64 Mach-O.
+      # (Info.plist, codesign, dmgbuild settings) the unit tests can't see.
       - name: bt bundle (БелкаТуннель, universal)
         run: ./bt bundle
 
