@@ -184,7 +184,7 @@ def cmd_release() -> None:
     verify.verify_bundle()
     verify.verify_policies()
     notarize.cmd_notarize()  # staple app → rebuild dmg → sign+notarize+staple dmg
-    verify.verify_dmg()
+    dmg.verify_dmg()
 
     # pfUsers
     build.bundle_pfusers()
