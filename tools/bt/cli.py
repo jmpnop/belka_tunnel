@@ -151,24 +151,48 @@ def cmd_dmg_pfusers() -> None:
 
 @app.command(name="notarize")
 def cmd_notarize() -> None:
-    """Sign + notarize + staple the latest DMG. Needs SIGN_IDENTITY + NOTARY_PROFILE env."""
+    """БелкаТуннель: staple the .app, rebuild + sign + notarize + staple the DMG.
+
+    Run after `bt bundle`. Produces a fully-notarized DMG whose app also
+    launches offline. Needs SIGN_IDENTITY + NOTARY_PROFILE env.
+    """
     notarize.cmd_notarize()
+
+
+@app.command(name="notarize-pfusers")
+def cmd_notarize_pfusers() -> None:
+    """pfUsers: staple the .app, rebuild + sign + notarize + staple the DMG.
+
+    Run after `bt bundle-pfusers`. Needs SIGN_IDENTITY + NOTARY_PROFILE env.
+    """
+    notarize.cmd_notarize_pfusers()
 
 
 @app.command(name="release")
 def cmd_release() -> None:
-    """Full release pipeline: universal → bundle → verify → dmg → notarize.
+    """Full release pipeline for BOTH apps: bundle → verify → notarize (app+dmg).
 
-    Requires SIGN_IDENTITY and NOTARY_PROFILE env. Produces a signed +
-    notarized + stapled DMG ready for distribution.
+    Requires SIGN_IDENTITY and NOTARY_PROFILE env. For each app: build the
+    universal signed bundle, verify it, then `notarize` — which staples the
+    .app, rebuilds the DMG from the stapled app, and signs + notarizes +
+    staples the DMG. Produces two distribution-ready, fully-notarized DMGs.
     """
     util.step("release pipeline")
-    build.bundle()  # always universal + cleaned
+
+    # БелкаТуннель
+    build.bundle()  # always universal; signs the .app with SIGN_IDENTITY
     verify.verify_bundle()
     verify.verify_policies()
-    dmg.build_dmg()
-    notarize.cmd_notarize()
-    util.ok("release artifact ready")
+    notarize.cmd_notarize()  # staple app → rebuild dmg → sign+notarize+staple dmg
+    verify.verify_dmg()
+
+    # pfUsers
+    build.bundle_pfusers()
+    verify.verify_pfusers_bundle()
+    notarize.cmd_notarize_pfusers()
+    dmg.verify_pfusers_dmg()
+
+    util.ok("release artifacts ready (BelkaTunnel + pfUsers, signed + notarized)")
 
 
 # ---------- Smoke / bench ----------

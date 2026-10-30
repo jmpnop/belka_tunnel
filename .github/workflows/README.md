@@ -7,9 +7,13 @@ Self-hosted runners are free and unaffected by that lock.
 
 - **`ci.yml`** — on every push to `main` + every PR: `bt precommit` (fmt +
   clippy + tests) → `bt bundle` + `bt verify bundle` → same for pfUsers.
-- **`release.yml`** — on `git push origin vX.Y.Z`: builds both apps universal,
-  verifies, builds both DMGs, notarizes *if* signing secrets are set, and
-  publishes a GitHub Release with both DMGs attached.
+- **`release.yml`** — on `git push origin vX.Y.Z`: builds + signs both apps
+  universal, verifies, then — *if* the notary secrets are set — notarizes and
+  staples **both the .app and the .dmg** for each app (`bt notarize` /
+  `bt notarize-pfusers`; the app ticket travels inside the DMG so an installed
+  copy launches offline). Without secrets it falls back to ad-hoc-signed DMGs.
+  Finally it verifies both DMGs and publishes a GitHub Release with them
+  attached.
 
 Both are validated with [`actionlint`](https://github.com/rhysd/actionlint).
 
@@ -37,6 +41,14 @@ download) — same as the current local builds. To notarize, set repo secrets
 `SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`. On a
 self-hosted Mac the Developer ID key is already in the login keychain, so no
 `CERTIFICATES_P12` import is needed — `SIGN_IDENTITY` alone drives `bt`'s signing.
+`APPLE_ID` + `APPLE_TEAM_ID` + `APPLE_APP_PASSWORD` are stored once into a
+`notarytool` keychain profile (`BELKA-NOTARY`) and gate the notarize steps.
+
+The notarize path staples both artifacts for each app: `bt notarize` (and
+`bt notarize-pfusers`) notarize + staple the `.app`, rebuild the DMG from the
+stapled app, then sign + notarize + staple the DMG. Locally you can run the
+whole thing for both apps with `bt release` (needs `SIGN_IDENTITY` +
+`NOTARY_PROFILE` in the environment).
 
 > **Do not** reference `secrets.*` in a step `if:` — the `secrets` context isn't
 > available there and GitHub rejects the whole file at parse time (a 0-second

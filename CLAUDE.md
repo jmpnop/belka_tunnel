@@ -300,9 +300,9 @@ dmgbuild's `icon = …` setting silently no-ops in this environment (the resourc
 Two GitHub Actions workflows live under `.github/workflows/`:
 
 - **`ci.yml`** — runs on every push to main + every PR. macos-14 runner. Caches `target/` + `~/.cargo/`. Steps: `bt precommit` (fmt-check + clippy + workspace tests), `bt bundle` + `bt verify bundle`, `bt bundle-pfusers` + `bt verify pfusers`. The bundle steps catch Info.plist / codesign / dmgbuild settings regressions that pure unit tests can't see.
-- **`release.yml`** — triggered by `git push origin vX.Y.Z`. Builds the universal binary, bundles both apps, verifies both .app and both .dmg, optionally codesigns + notarizes if `secrets.CERTIFICATES_P12` + `SIGN_IDENTITY` + `APPLE_ID` / `APPLE_TEAM_ID` / `APPLE_APP_PASSWORD` are set, then uploads both DMGs to a GitHub release via `softprops/action-gh-release@v2`. Without the secrets the bundles stay ad-hoc-signed and the release ships with a Gatekeeper warning — still functional, just not notarized.
+- **`release.yml`** — triggered by `git push origin vX.Y.Z`. Builds + signs both universal app bundles, verifies them, then — if the notary secrets (`SIGN_IDENTITY` + `APPLE_ID` + `APPLE_TEAM_ID` + `APPLE_APP_PASSWORD`) are set — runs `bt notarize` + `bt notarize-pfusers`, which **notarize + staple both the `.app` and the `.dmg`** for each app (the app ticket rides inside the DMG so an installed copy launches offline). On the self-hosted Mac the Developer ID key lives in the login keychain, so no `CERTIFICATES_P12` import is needed — `SIGN_IDENTITY` alone drives signing, and `APPLE_ID`/`APPLE_TEAM_ID`/`APPLE_APP_PASSWORD` seed the `BELKA-NOTARY` notarytool profile. Without the secrets it builds ad-hoc-signed DMGs (Gatekeeper warning) instead. Finally it verifies both DMGs and uploads them to a GitHub release via `softprops/action-gh-release@v2`.
 
-Local release flow without CI: `./bt bundle && ./bt dmg && ./bt bundle-pfusers && ./bt dmg-pfusers && gh release create vX.Y.Z app/dist/BelkaTunnel-X.Y.Z.dmg pfusers/dist/pfUsers-X.Y.Z.dmg`. The release workflow does the same steps; the CI workflow is what catches issues before tagging.
+Local release flow without CI: `./bt bundle && ./bt dmg && ./bt bundle-pfusers && ./bt dmg-pfusers && gh release create vX.Y.Z app/dist/BelkaTunnel-X.Y.Z.dmg pfusers/dist/pfUsers-X.Y.Z.dmg` (ad-hoc-signed DMGs). For **signed + notarized** DMGs, run `SIGN_IDENTITY="Developer ID Application: … (TEAMID)" NOTARY_PROFILE=BELKA-NOTARY ./bt release` first (it bundles, verifies, and notarizes + staples both the `.app` and the `.dmg` for both apps), then `gh release create` with the two DMGs. The release workflow does the same steps; the CI workflow is what catches issues before tagging.
 
 ### Run
 
@@ -425,8 +425,7 @@ RUST_LOG=info pfusers/dist/pfUsers.app/Contents/MacOS/pfusers
 
 ### Known limitations / open items
 
-- **No DMG packaging yet.** `bt dmg-pfusers` not implemented; only the .app exists in `pfusers/dist/`.
-- **No notarization wiring** — `SIGN_IDENTITY` env var is honoured by `pfusers/build-app.sh` but there's no `bt notarize-pfusers` command.
+- **Notarization is wired.** `bt notarize-pfusers` notarizes + staples both the `pfUsers.app` and its DMG (needs `SIGN_IDENTITY` + `NOTARY_PROFILE`), mirroring `bt notarize`. The release workflow runs it automatically when the notary secrets are present.
 - **No Add-or-Edit groups UI.** If a real `vpn-users` group ever materialises on the router, the GUI needs the membership card back (engine support remains).
 - **Single-router scope.** pfusers connects to one endpoint at a time. Multi-router support would mean a profile concept in `config.json`, similar to БелкаТуннель.
 
@@ -576,5 +575,4 @@ fi
 - Consider a second user / key for redundancy in case the client's key is rotated.
 - Rotate the Cloudflare API token now that the setup is verified (see *Secrets* above).
 - Remove the disabled NoIP entry from pfSense config once Cloudflare DDNS has run successfully through a real WAN-IP change.
-- **pfUsers**: build a release DMG (`bt dmg-pfusers` not yet implemented).
-- **pfUsers**: wire `bt notarize-pfusers` for distribution. `SIGN_IDENTITY` env var is honoured by `pfusers/build-app.sh` but no notarize step exists.
+- ~~**pfUsers**: wire `bt notarize-pfusers` for distribution.~~ Done — `bt notarize-pfusers` notarizes + staples the pfUsers `.app` + DMG, and `release.yml` runs it when the notary secrets are set. See [pfUsers build/test](#build--test--harness-1).

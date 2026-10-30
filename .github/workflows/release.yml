@@ -61,7 +61,9 @@ jobs:
       - name: bt precommit (sanity gate)
         run: ./bt precommit
 
-      # ---------- БелкаТуннель ----------
+      # ---------- Build + sign the .app bundles (universal) ----------
+      # build-app.sh signs each .app with SIGN_IDENTITY + hardened runtime when
+      # the secret is present; otherwise it ad-hoc signs (dev build).
       - name: bt bundle (universal)
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
@@ -70,13 +72,6 @@ jobs:
       - name: bt verify bundle
         run: ./bt verify bundle
 
-      - name: bt dmg
-        run: ./bt dmg
-
-      - name: bt verify dmg
-        run: ./bt verify dmg
-
-      # ---------- pfUsers ----------
       - name: bt bundle-pfusers (universal)
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
@@ -85,15 +80,10 @@ jobs:
       - name: bt verify pfusers
         run: ./bt verify pfusers
 
-      - name: bt dmg-pfusers
-        run: ./bt dmg-pfusers
-
-      - name: bt verify pfusers-dmg
-        run: ./bt verify pfusers-dmg
-
-      # ---------- Notarize (only with a signing identity + notary creds) ----------
-      # On a self-hosted Mac the Developer ID key lives in the login keychain,
-      # so bt signs with SIGN_IDENTITY directly — no p12 import step needed.
+      # ---------- One-time notary credential store ----------
+      # On a self-hosted Mac the Developer ID key already lives in the login
+      # keychain, so bt signs with SIGN_IDENTITY directly — no p12 import.
+      # notarytool, however, needs its own keychain profile.
       - name: Store notarytool credentials
         if: steps.caps.outputs.notarize == 'true'
         env:
@@ -106,12 +96,42 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_PASSWORD"
 
-      - name: Notarize + staple (BelkaTunnel)
+      # ---------- Notarized path (secrets present) ----------
+      # `bt notarize` staples the .app, REBUILDS the DMG from the stapled app
+      # (so the ticket travels inside the DMG → offline first launch), then
+      # signs + notarizes + staples the DMG itself. Each command owns its DMG
+      # build, so the standalone `bt dmg` step is skipped on this path.
+      - name: Notarize BelkaTunnel (app + dmg)
         if: steps.caps.outputs.notarize == 'true'
         env:
           SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
           NOTARY_PROFILE: BELKA-NOTARY
         run: ./bt notarize
+
+      - name: Notarize pfUsers (app + dmg)
+        if: steps.caps.outputs.notarize == 'true'
+        env:
+          SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
+          NOTARY_PROFILE: BELKA-NOTARY
+        run: ./bt notarize-pfusers
+
+      # ---------- Ad-hoc path (no notary secrets) ----------
+      # Without credentials we still produce installable (ad-hoc-signed) DMGs;
+      # they carry a Gatekeeper warning on download.
+      - name: bt dmg (ad-hoc)
+        if: steps.caps.outputs.notarize != 'true'
+        run: ./bt dmg
+
+      - name: bt dmg-pfusers (ad-hoc)
+        if: steps.caps.outputs.notarize != 'true'
+        run: ./bt dmg-pfusers
+
+      # ---------- Verify the final DMGs (either path) ----------
+      - name: bt verify dmg
+        run: ./bt verify dmg
+
+      - name: bt verify pfusers-dmg
+        run: ./bt verify pfusers-dmg
 
       # ---------- Publish ----------
       - name: Create GitHub release with both DMGs
