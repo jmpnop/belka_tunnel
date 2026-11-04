@@ -416,7 +416,7 @@ impl eframe::App for AboutApp {
                         egui::pos2(content_rect.left(), divider_y),
                         egui::pos2(content_rect.right(), divider_y),
                     ],
-                    Stroke::new(1.0, Color32::from_rgb(35, 38, 46)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(35, 38, 46)),
                 );
 
                 content_ui.add_space(10.0);
@@ -465,7 +465,7 @@ impl eframe::App for AboutApp {
 fn chip(ui: &mut egui::Ui, text: &str) {
     Frame::none()
         .fill(Color32::from_rgb(24, 27, 33))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(46, 50, 60)))
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(46, 50, 60)))
         .rounding(Rounding::same(999.0))
         .inner_margin(Margin::symmetric(10.0, 4.0))
         .show(ui, |ui| {

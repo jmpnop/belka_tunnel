@@ -41,6 +41,26 @@ Host key fingerprint (ed25519): `SHA256:REDACTED-see-DEPLOYMENT.md`
   - `UsePAM no`
   - → key-only auth via `authorized_keys`.
 
+## route64 WireGuard IPv6 egress (pfSense)
+
+Added 2026-11-04: the pfSense router gains IPv6 to the internet through a
+[route64.org](https://manager.route64.org) WireGuard **tunnelbroker** (AS212895),
+exiting at the PoP physically closest to the operator (**New York City** — ~6 ms to
+Cloudflare v6). pfSense is the WireGuard *client*; the broker is the peer. **Real
+endpoint, keys, delegated `/64`, and the route64 + pfSense-web-GUI logins live in
+`DEPLOYMENT.md`** (gitignored) — the values below are structural only.
+
+Built entirely in the pfSense web GUI (`https://192.168.1.1`, user `admin`):
+
+1. **VPN → WireGuard → Tunnels** — tunnel `tun_wg0` (listen port `51820`, client private key). The `pfSense-pkg-WireGuard` package was already installed. **Peer** → broker endpoint `<ip:port>`, broker public key, **Allowed IPs `::/0`**, persistent keepalive `15`.
+2. **Interfaces → Assignments** — `tun_wg0` assigned as **OPT2**, enabled, IPv6 Configuration Type = **Static IPv6** with the delegated client address (`…::2/64`), upstream gateway None.
+3. **System → Routing → Gateways** — gateway `ROUTE64_WG_V6` on OPT2 = the broker's link address (`…::1`), set as **Default gateway IPv6** → installs the `::/0` default route out `tun_wg0`.
+4. **Firewall → Rules → LAN** — pass rule, Address Family IPv6, Protocol Any, Source **LAN net**, so LAN hosts egress IPv6 through the tunnel.
+
+Verify on the router: `wg show` (latest handshake), `netstat -rn -f inet6 | grep default`
+(→ `::/0 … UGS tun_wg0`), `ping6 2606:4700:4700::1111`, `curl -6 https://api6.ipify.org`
+(returns the tunnel's client IPv6). Exact commands + real values are in `DEPLOYMENT.md`.
+
 ## Changes applied on 2026-05-28
 
 ### 1. WAN firewall rule (added via `pfSsh.php`)

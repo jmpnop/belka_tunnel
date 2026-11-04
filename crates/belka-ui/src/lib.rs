@@ -86,37 +86,37 @@ pub fn apply_zed_theme(ctx: &egui::Context) {
 
     style.visuals.widgets.noninteractive.bg_fill = PANEL;
     style.visuals.widgets.noninteractive.weak_bg_fill = CARD;
-    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     style.visuals.widgets.noninteractive.rounding = Rounding::same(6.0);
 
     style.visuals.widgets.inactive.bg_fill = CARD;
     style.visuals.widgets.inactive.weak_bg_fill = FIELD_BG;
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     style.visuals.widgets.inactive.rounding = Rounding::same(6.0);
 
     style.visuals.widgets.hovered.bg_fill = CARD;
     style.visuals.widgets.hovered.weak_bg_fill = FIELD_BG;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
-    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, TEXT_PRIMARY);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, TEXT_PRIMARY);
     style.visuals.widgets.hovered.rounding = Rounding::same(6.0);
 
     style.visuals.widgets.active.bg_fill = ACCENT;
     style.visuals.widgets.active.weak_bg_fill = ACCENT;
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT_HOVER);
-    style.visuals.widgets.active.fg_stroke = Stroke::new(1.5, Color32::WHITE);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, ACCENT_HOVER);
+    style.visuals.widgets.active.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
     style.visuals.widgets.active.rounding = Rounding::same(6.0);
 
     style.visuals.widgets.open.bg_fill = CARD;
     style.visuals.widgets.open.weak_bg_fill = FIELD_BG;
-    style.visuals.widgets.open.bg_stroke = Stroke::new(1.0, BORDER_STRONG);
-    style.visuals.widgets.open.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    style.visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, BORDER_STRONG);
+    style.visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     style.visuals.widgets.open.rounding = Rounding::same(6.0);
 
     style.visuals.selection.bg_fill = ACCENT.linear_multiply(0.4);
-    style.visuals.selection.stroke = Stroke::new(1.0, ACCENT);
-    style.visuals.window_stroke = Stroke::new(1.0, BORDER);
+    style.visuals.selection.stroke = Stroke::new(1.0_f32, ACCENT);
+    style.visuals.window_stroke = Stroke::new(1.0_f32, BORDER);
     style.visuals.window_rounding = Rounding::same(10.0);
     style.visuals.menu_rounding = Rounding::same(8.0);
     style.visuals.hyperlink_color = ACCENT;
@@ -151,7 +151,7 @@ pub fn apply_zed_theme(ctx: &egui::Context) {
 pub fn card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     Frame::none()
         .fill(theme::CARD)
-        .stroke(Stroke::new(1.0, theme::BORDER))
+        .stroke(Stroke::new(1.0_f32, theme::BORDER))
         .rounding(Rounding::same(10.0))
         .inner_margin(Margin::same(18.0))
         .show(ui, add_contents)
@@ -194,7 +194,7 @@ pub fn field(ui: &mut egui::Ui, label: &str, hint: Option<&str>, add: impl FnOnc
 pub fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     Frame::none()
         .fill(color.linear_multiply(0.18))
-        .stroke(Stroke::new(1.0, color.linear_multiply(0.4)))
+        .stroke(Stroke::new(1.0_f32, color.linear_multiply(0.4)))
         .rounding(Rounding::same(999.0))
         .inner_margin(Margin::symmetric(8.0, 2.0))
         .show(ui, |ui| {
@@ -206,7 +206,7 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
             .fill(theme::ACCENT)
-            .stroke(Stroke::new(1.0, theme::ACCENT_HOVER))
+            .stroke(Stroke::new(1.0_f32, theme::ACCENT_HOVER))
             .rounding(Rounding::same(8.0)),
     )
 }
@@ -215,7 +215,7 @@ pub fn ghost_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new(text).color(theme::TEXT_PRIMARY))
             .fill(theme::CARD)
-            .stroke(Stroke::new(1.0, theme::BORDER))
+            .stroke(Stroke::new(1.0_f32, theme::BORDER))
             .rounding(Rounding::same(8.0)),
     )
 }
@@ -224,7 +224,7 @@ pub fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new(text).color(theme::DANGER))
             .fill(theme::CARD)
-            .stroke(Stroke::new(1.0, theme::DANGER.linear_multiply(0.4)))
+            .stroke(Stroke::new(1.0_f32, theme::DANGER.linear_multiply(0.4)))
             .rounding(Rounding::same(8.0)),
     )
 }
@@ -246,7 +246,7 @@ pub fn toggle_widget<'a>(label: &'a str, on: &'a mut bool) -> impl egui::Widget 
                 rect,
                 Rounding::same(10.0),
                 bg,
-                Stroke::new(1.0, visuals.bg_stroke.color),
+                Stroke::new(1.0_f32, visuals.bg_stroke.color),
             );
             let knob_radius = 7.5;
             let knob_x = egui::lerp(

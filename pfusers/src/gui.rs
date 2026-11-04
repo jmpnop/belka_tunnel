@@ -464,7 +464,7 @@ impl App {
                 Frame::none()
                     .fill(theme::PANEL)
                     .inner_margin(Margin::symmetric(20.0, 14.0))
-                    .stroke(Stroke::new(1.0, theme::BORDER)),
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -568,9 +568,9 @@ impl App {
                             theme::CARD
                         };
                         let stroke = if is_selected {
-                            Stroke::new(1.0, theme::ACCENT)
+                            Stroke::new(1.0_f32, theme::ACCENT)
                         } else {
-                            Stroke::new(1.0, theme::BORDER)
+                            Stroke::new(1.0_f32, theme::BORDER)
                         };
                         let resp = Frame::none()
                             .fill(bg)
@@ -769,7 +769,7 @@ impl App {
 
                     Frame::none()
                         .fill(theme::DANGER.linear_multiply(0.08))
-                        .stroke(Stroke::new(1.0, theme::DANGER.linear_multiply(0.5)))
+                        .stroke(Stroke::new(1.0_f32, theme::DANGER.linear_multiply(0.5)))
                         .rounding(Rounding::same(10.0))
                         .inner_margin(Margin::same(16.0))
                         .show(ui, |ui| {
@@ -821,7 +821,7 @@ impl App {
                     .frame(
                         Frame::none()
                             .fill(theme::ACCENT.linear_multiply(0.18))
-                            .stroke(Stroke::new(1.0, theme::ACCENT.linear_multiply(0.4)))
+                            .stroke(Stroke::new(1.0_f32, theme::ACCENT.linear_multiply(0.4)))
                             .inner_margin(Margin::symmetric(18.0, 10.0)),
                     )
                     .show(ctx, |ui| {
@@ -838,7 +838,7 @@ impl App {
             .frame(
                 Frame::none()
                     .fill(fill)
-                    .stroke(Stroke::new(1.0, color.linear_multiply(0.4)))
+                    .stroke(Stroke::new(1.0_f32, color.linear_multiply(0.4)))
                     .inner_margin(Margin::symmetric(18.0, 10.0)),
             )
             .show(ctx, |ui| {
@@ -863,7 +863,7 @@ impl App {
             .frame(
                 Frame::none()
                     .fill(theme::PANEL)
-                    .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER_STRONG))
                     .rounding(Rounding::same(10.0))
                     .inner_margin(Margin::same(22.0)),
             )
@@ -958,7 +958,7 @@ impl App {
             .frame(
                 Frame::none()
                     .fill(theme::PANEL)
-                    .stroke(Stroke::new(1.0, theme::DANGER.linear_multiply(0.5)))
+                    .stroke(Stroke::new(1.0_f32, theme::DANGER.linear_multiply(0.5)))
                     .rounding(Rounding::same(10.0))
                     .inner_margin(Margin::same(22.0)),
             )
@@ -1005,7 +1005,7 @@ impl App {
                             confirmed,
                             egui::Button::new(RichText::new("  Delete User  ").color(theme::DANGER).strong())
                                 .fill(theme::CARD)
-                                .stroke(Stroke::new(1.0, theme::DANGER))
+                                .stroke(Stroke::new(1.0_f32, theme::DANGER))
                                 .rounding(Rounding::same(8.0)),
                         )
                         .clicked()
@@ -1037,7 +1037,7 @@ impl App {
             .frame(
                 Frame::none()
                     .fill(theme::PANEL)
-                    .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER_STRONG))
                     .rounding(Rounding::same(10.0))
                     .inner_margin(Margin::same(22.0)),
             )

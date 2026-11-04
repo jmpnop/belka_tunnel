@@ -146,7 +146,7 @@ impl ConfigApp {
                 Frame::none()
                     .fill(theme::PANEL)
                     .inner_margin(Margin::symmetric(20.0, 14.0))
-                    .stroke(Stroke::new(1.0, theme::BORDER)),
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -219,9 +219,9 @@ impl ConfigApp {
                         theme::CARD
                     };
                     let stroke = if is_selected {
-                        Stroke::new(1.0, theme::ACCENT)
+                        Stroke::new(1.0_f32, theme::ACCENT)
                     } else {
-                        Stroke::new(1.0, theme::BORDER)
+                        Stroke::new(1.0_f32, theme::BORDER)
                     };
 
                     let resp = Frame::none()
@@ -272,7 +272,7 @@ impl ConfigApp {
                 ui.add_space(8.0);
                 Frame::none()
                     .fill(theme::CARD)
-                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER))
                     .rounding(Rounding::same(8.0))
                     .inner_margin(Margin::same(10.0))
                     .show(ui, |ui| {
@@ -353,7 +353,7 @@ impl ConfigApp {
                                 .color(theme::TEXT_PRIMARY),
                         )
                         .fill(theme::CARD)
-                        .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+                        .stroke(Stroke::new(1.0_f32, theme::BORDER_STRONG))
                         .rounding(Rounding::same(8.0)),
                     )
                     .clicked()
@@ -829,7 +829,7 @@ impl ConfigApp {
                     if is_active {
                         Frame::none()
                             .fill(theme::ACCENT.linear_multiply(0.10))
-                            .stroke(Stroke::new(1.0, theme::ACCENT.linear_multiply(0.4)))
+                            .stroke(Stroke::new(1.0_f32, theme::ACCENT.linear_multiply(0.4)))
                             .rounding(Rounding::same(8.0))
                             .inner_margin(Margin::same(14.0))
                             .show(ui, |ui| {
@@ -842,7 +842,7 @@ impl ConfigApp {
                     } else {
                         Frame::none()
                             .fill(theme::CARD)
-                            .stroke(Stroke::new(1.0, theme::BORDER))
+                            .stroke(Stroke::new(1.0_f32, theme::BORDER))
                             .rounding(Rounding::same(8.0))
                             .inner_margin(Margin::same(14.0))
                             .show(ui, |ui| {
@@ -881,7 +881,7 @@ impl ConfigApp {
                 .frame(
                     Frame::none()
                         .fill(fill)
-                        .stroke(Stroke::new(1.0, color.linear_multiply(0.4)))
+                        .stroke(Stroke::new(1.0_f32, color.linear_multiply(0.4)))
                         .inner_margin(Margin::symmetric(18.0, 10.0)),
                 )
                 .show(ctx, |ui| {
@@ -906,7 +906,7 @@ impl ConfigApp {
                 .frame(
                     Frame::none()
                         .fill(theme::PANEL)
-                        .stroke(Stroke::new(1.0, theme::BORDER_STRONG))
+                        .stroke(Stroke::new(1.0_f32, theme::BORDER_STRONG))
                         .rounding(Rounding::same(10.0))
                         .inner_margin(Margin::same(20.0)),
                 )
